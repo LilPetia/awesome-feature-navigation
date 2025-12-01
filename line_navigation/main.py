@@ -9,7 +9,7 @@ class IMUSample:
     Одно измерение IMU.
 
     t      : время (сек)
-    accel  : ускорение / specific force (акселерометр), shape (3,), в body-фрейме
+    accel  : ускорение / specific force (акселерометр), shape (3,)
     omega  : угловая скорость (гироскоп), shape (3,), в body-фрейме
     """
 
@@ -120,17 +120,6 @@ class IMUPreintegrationWrapper:
             pim=self._pim,
         )
 
-def Preintegrate(params: gtsam.PreintegrationParams, bias: gtsam.imuBias.ConstantBias, samples: Sequence[IMUSample]) -> IMUPreintegrationResult:
-    """
-    Удобная обёртка в стиле функции:
-
-        result = Preintegrate(params, bias, imu_samples)
-
-    Возвращает IMUPreintegrationResult.
-    """
-    wrapper = IMUPreintegrationWrapper(params, bias)
-    return wrapper.integrate_segment(samples)
-
 if __name__ == "__main__":
     # Минимальный пример использования
 
@@ -159,7 +148,9 @@ if __name__ == "__main__":
         samples.append(IMUSample(t=t, accel=accel, omega=omega))
 
     # 4. Преинтеграция
-    result = Preintegrate(params, bias, samples)
+    preintegration_wrapper = IMUPreintegrationWrapper(params=params, initial_bias=bias)
+
+    result = preintegration_wrapper.Preintegrate(samples)
 
     # 5. Вывод результатов
     print("Δt:", result.delta_t)
