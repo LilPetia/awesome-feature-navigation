@@ -1,0 +1,17 @@
+[project]
+name = "lane-centerline-tracker"
+version = "0.1.0"
+description = "Simple OpenCV script to track the central line of a lane from video."
+authors = [
+  { name = "Tyrion Lannister" }
+]
+requires-python = ">=3.11"
+
+dependencies = [
+  "numpy>=2.3.4",
+  "opencv-python>=4.12.0.88",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
