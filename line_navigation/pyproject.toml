@@ -1,0 +1,11 @@
+[project]
+name = "awesome-feature-navigation"
+version = "1.0.1"
+description = "A module producing robot's trajectory based on images and imu"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "gtsam>=4.2",
+    "numpy<2",
+    "pytest>=9.0.1",
+]
