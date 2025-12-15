@@ -1,0 +1,23 @@
+# HSV thresholds for red tape (two ranges because red wraps around hue=0)
+hsv_red1_low:  [0, 80, 80]
+hsv_red1_high: [10, 255, 255]
+hsv_red2_low:  [160, 80, 80]
+hsv_red2_high: [180, 255, 255]
+
+# Morphology
+blur_ksize: 5
+open_ksize: 5
+close_ksize: 7
+
+# Centerline extraction
+min_row_pixels: 8
+ema_alpha: 0.85
+
+# Fusion gains
+vision_yaw_gain: 0.08          # how strongly yaw is corrected from tape direction (rad update per frame)
+vision_yaw_max_correction: 0.12 # rad/frame clamp
+vision_lateral_gain: 0.002      # meters per pixel of lateral error (rough scale)
+forward_speed_mps: 0.25         # only used if IMU is missing
+
+# Plot / sampling
+max_frames: 0   # 0 = no limit
