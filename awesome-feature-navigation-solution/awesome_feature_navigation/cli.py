@@ -49,7 +49,7 @@ def main() -> None:
     )
 
     csv_path = str(Path(str(out_prefix) + ".csv"))
-    png_path = str(Path(str(out_prefix) + ".png"))
+    png_path = str(Path(str(out_prefix) + ".html"))
     save_trajectory_csv(traj, csv_path)
     save_trajectory_plot(traj, png_path)
 

@@ -8,6 +8,8 @@ import cv2
 import yaml
 import numpy as np
 
+from .line_detection import LineDetector
+
 
 def _nothing(x: int) -> None:
     return
@@ -25,32 +27,27 @@ def _save_cfg(path: str, cfg: Dict) -> None:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Tune HSV thresholds for red tape")
+    ap = argparse.ArgumentParser()
     ap.add_argument("--video", required=True)
     ap.add_argument("--config", default="config.yaml")
     args = ap.parse_args()
 
     cfg = _load_cfg(args.config)
+    detector = LineDetector()
 
-    # Trackbars for two red ranges in HSV
-    win = "tuner"
+    win = "Tuner"
     cv2.namedWindow(win)
 
-    def make_tb(name: str, init: int) -> None:
-        cv2.createTrackbar(name, win, int(init), 255, _nothing)
+    def make_tb(name: str, default: int) -> None:
+        val = int(cfg.get(name, default))
+        cv2.createTrackbar(name, win, val, 255, _nothing)
 
-    # defaults
-    defaults = {
-        "r1_h_low": 0, "r1_h_high": 10,
-        "r1_s_low": 80, "r1_s_high": 255,
-        "r1_v_low": 80, "r1_v_high": 255,
-        "r2_h_low": 160, "r2_h_high": 180,
-        "r2_s_low": 80, "r2_s_high": 255,
-        "r2_v_low": 80, "r2_v_high": 255,
-    }
-
-    for k, v in defaults.items():
-        make_tb(k, int(cfg.get(k, v)))
+    make_tb("LB", 0)
+    make_tb("LG", 0)
+    make_tb("LR", 200)
+    make_tb("HB", 255)
+    make_tb("HG", 255)
+    make_tb("HR", 255)
 
     cap = cv2.VideoCapture(args.video)
     if not cap.isOpened():
@@ -62,37 +59,32 @@ def main() -> None:
             cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             continue
 
-        vals = {k: cv2.getTrackbarPos(k, win) for k in defaults.keys()}
+        current_cfg = {
+            "LB": cv2.getTrackbarPos("LB", win),
+            "LG": cv2.getTrackbarPos("LG", win),
+            "LR": cv2.getTrackbarPos("LR", win),
+            "HB": cv2.getTrackbarPos("HB", win),
+            "HG": cv2.getTrackbarPos("HG", win),
+            "HR": cv2.getTrackbarPos("HR", win),
+        }
 
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-        r1l = np.array([vals["r1_h_low"], vals["r1_s_low"], vals["r1_v_low"]], dtype=np.uint8)
-        r1h = np.array([vals["r1_h_high"], vals["r1_s_high"], vals["r1_v_high"]], dtype=np.uint8)
-        r2l = np.array([vals["r2_h_low"], vals["r2_s_low"], vals["r2_v_low"]], dtype=np.uint8)
-        r2h = np.array([vals["r2_h_high"], vals["r2_s_high"], vals["r2_v_high"]], dtype=np.uint8)
+        obs = detector.process(frame, current_cfg)
 
-        m1 = cv2.inRange(hsv, r1l, r1h)
-        m2 = cv2.inRange(hsv, r2l, r2h)
-        mask = cv2.bitwise_or(m1, m2)
-        mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+        scale = 0.8
+        h, w = frame.shape[:2]
+        frame_resized = cv2.resize(frame, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_AREA)
 
-        vis = cv2.addWeighted(frame, 1.0, mask_bgr, 0.4, 0.0)
-        cv2.imshow(win, vis)
+        line_bgr = cv2.cvtColor(obs.mask, cv2.COLOR_GRAY2BGR)
+        combined = np.hstack([frame_resized, line_bgr])
 
-        key = cv2.waitKey(1) & 0xFF
+        cv2.imshow(win, combined)
+
+        key = cv2.waitKey(30) & 0xFF
         if key == ord('q'):
             break
         if key == ord('s'):
-            # save in the config format used by the pipeline
-            out_cfg = dict(cfg)
-            out_cfg.update({
-                "hsv_red1_low":  [vals["r1_h_low"], vals["r1_s_low"], vals["r1_v_low"]],
-                "hsv_red1_high": [vals["r1_h_high"], vals["r1_s_high"], vals["r1_v_high"]],
-                "hsv_red2_low":  [vals["r2_h_low"], vals["r2_s_low"], vals["r2_v_low"]],
-                "hsv_red2_high": [vals["r2_h_high"], vals["r2_s_high"], vals["r2_v_high"]],
-            })
-            # also keep raw trackbars if you want
-            out_cfg.update(vals)
-            _save_cfg(args.config, out_cfg)
+            cfg.update(current_cfg)
+            _save_cfg(args.config, cfg)
             print(f"Saved config -> {args.config}")
 
     cap.release()

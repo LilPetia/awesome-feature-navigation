@@ -13,6 +13,14 @@ close_ksize: 7
 min_row_pixels: 8
 ema_alpha: 0.85
 
+LB: 0
+LG: 0
+LR: 200
+
+HB: 198
+HG: 255
+HR: 255
+
 # Fusion gains
 vision_yaw_gain: 0.08          # how strongly yaw is corrected from tape direction (rad update per frame)
 vision_yaw_max_correction: 0.12 # rad/frame clamp
