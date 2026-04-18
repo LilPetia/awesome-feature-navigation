@@ -27,10 +27,10 @@
 
 | Команда | Тип | Назначение |
 | --- | --- | --- |
-| `afn-run` | основной CLI | Построение 2D-траектории по видео и IMU |
-| `afn-tune` | основной CLI | Интерактивная настройка HSV-порогов для выделения цветной линии |
-| `python -m awesome_feature_navigation.cli` | эквивалент `afn-run` | Альтернативный запуск основного CLI через модуль |
-| `python -m awesome_feature_navigation.tuner` | эквивалент `afn-tune` | Альтернативный запуск тюнера через модуль |
+| `uv run afn-run` | основной CLI | Построение 2D-траектории по видео и IMU |
+| `uv run afn-tune` | основной CLI | Интерактивная настройка HSV-порогов для выделения цветной линии |
+| `python -m awesome_feature_navigation.cli` | эквивалент `uv run afn-run` | Альтернативный запуск основного CLI через модуль |
+| `python -m awesome_feature_navigation.tuner` | эквивалент `uv run afn-tune` | Альтернативный запуск тюнера через модуль |
 | `python check-info.py` | вспомогательный скрипт | Быстрая проверка длительности видео и IMU |
 | `python fix_imu.py` | вспомогательный скрипт | Нормализация timestamps IMU и сохранение исправленного CSV |
 
@@ -42,7 +42,7 @@
 - отдельная CLI-команда для тестов;
 - отдельная CLI-команда для обучения модели.
 
-Если нужна строгая формулировка: официальных CLI-команд у пакета ровно две, это `afn-run` и `afn-tune`.
+Если нужна строгая формулировка: официальных CLI-команд у пакета ровно две, это `uv run afn-run` и `uv run afn-tune`.
 
 ## Директории и два способа запуска
 
@@ -54,169 +54,102 @@
 
 ```bash
 cd awesome-feature-navigation-solution
-python -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -e .
+uv sync
 ```
 
 После этого можно запускать:
 
 ```bash
-afn-run ...
-afn-tune ...
+uv run afn-run ...
+uv run afn-tune ...
 ```
 
 ### Вариант 2. Запуск из корня репозитория
 
-Если пакет уже установлен в виртуальное окружение в корне репозитория, можно не переходить в `awesome-feature-navigation-solution`, а вызывать команды так:
+Если пакет уже установлен через `uv sync` в каталоге `awesome-feature-navigation-solution`, можно запускать напрямую через окружение:
 
 ```bash
-.venv/bin/afn-run ...
-.venv/bin/afn-tune ...
+cd awesome-feature-navigation-solution
+uv run afn-run ...
+uv run afn-tune ...
 ```
 
-или так:
+или через `python -m`:
 
 ```bash
-.venv/bin/python -m awesome_feature_navigation.cli ...
-.venv/bin/python -m awesome_feature_navigation.tuner ...
+uv run python -m awesome_feature_navigation.cli ...
+uv run python -m awesome_feature_navigation.tuner ...
 ```
 
 ### Что выбрать
 
-Если ты только начинаешь работать с проектом, проще и безопаснее использовать вариант из `README`, то есть перейти в `awesome-feature-navigation-solution`.
-
-Если тебе удобно работать из корня репозитория, можно использовать второй вариант, но только если пакет уже установлен в активную `.venv`.
+Проще всего использовать вариант из `README`: перейти в `awesome-feature-navigation-solution` и всё запускать через `uv run`.
 
 ## Рекомендуемая последовательность команд
 
 Если нужно пройти типичный рабочий цикл, команды обычно идут в таком порядке:
 
-1. Создать и активировать виртуальное окружение.
-2. Установить пакет в editable-режиме.
-3. Проверить исходные данные через `python check-info.py`.
+1. Установить зависимости через `uv sync`.
+2. Проверить исходные данные через `python check-info.py`.
 4. При необходимости подготовить IMU через `python fix_imu.py`.
-5. Подобрать цвет линии через `afn-tune`.
-6. Запустить основную оценку траектории через `afn-run`.
+5. Подобрать цвет линии через `uv run afn-tune`.
+6. Запустить основную оценку траектории через `uv run afn-run`.
 7. Просмотреть `csv`, `html` и при необходимости debug-видео.
 
 Дальше подробно разобрана каждая команда.
 
 ---
 
-## 1. Создание окружения и установка пакета
+## 1. Установка зависимостей
 
-### Команда `python -m venv .venv`
+### Команда `uv sync`
 
 ```bash
-python -m venv .venv
+cd awesome-feature-navigation-solution
+uv sync
 ```
 
 ### Зачем нужна
 
-Создает отдельное Python-окружение для проекта, чтобы зависимости не смешивались с системным Python или другими проектами.
+Создаёт виртуальное окружение `.venv` и устанавливает все зависимости из `pyproject.toml`. Если есть `uv.lock`, использует зафиксированные версии.
 
 ### Флаги
 
-У этой команды в текущем `README` флагов нет. Используется базовый вид.
+Базовый вид без флагов подходит для большинства случаев.
+
+| Флаг | Что делает |
+| --- | --- |
+| `--frozen` | Запрещает обновлять `uv.lock`, упавший с ошибкой если версии не совпадают |
+| `--no-dev` | Не устанавливает dev-зависимости |
 
 ### Что ожидать
 
-- Появится директория `.venv`.
-- Внутри нее будут `python`, `pip` и служебные файлы окружения.
-- Никакие файлы проекта эта команда не меняет.
+- Появится директория `.venv` с Python и установленными пакетами.
+- Установятся зависимости: `numpy`, `opencv-python`, `matplotlib`, `plotly`, `pyyaml`, `pandas`.
+- Код пакета ставится в editable-режиме (ссылкой на исходники).
 
 ### Типичные проблемы
 
-- Если команда не найдена, значит Python не установлен или не находится в `PATH`.
-- Если в системе несколько версий Python, окружение будет создано именно той версией, которую сейчас вызывает команда `python`.
-
-### Команда `source .venv/bin/activate`
-
-```bash
-source .venv/bin/activate
-```
-
-### Зачем нужна
-
-Активирует виртуальное окружение в текущем shell-сеансе.
-
-### Флаги
-
-Флагов нет.
-
-### Что ожидать
-
-- Команда `python` начнет указывать на Python из `.venv`.
-- Команда `pip` начнет ставить пакеты именно в `.venv`.
-- Команды `afn-run` и `afn-tune` будут доступны после `pip install -e .`.
-
-### Типичные проблемы
-
-- Если использовать не `source`, а просто выполнить файл активации как программу, окружение не активируется в текущем shell.
-- Если ты открыл новый терминал, окружение нужно активировать заново.
-
-### Команда `pip install -U pip`
-
-```bash
-pip install -U pip
-```
-
-### Зачем нужна
-
-Обновляет `pip` внутри виртуального окружения.
-
-### Разбор флагов
-
-| Флаг | Полное имя | Что делает |
-| --- | --- | --- |
-| `-U` | `--upgrade` | Обновляет пакет до более новой версии |
-
-### Что ожидать
-
-- `pip` обновится внутри текущего окружения.
-- На код проекта эта команда напрямую не влияет.
-
-### Команда `pip install -e .`
-
-```bash
-pip install -e .
-```
-
-### Зачем нужна
-
-Устанавливает пакет `awesome-feature-navigation` в editable-режиме.
-
-### Разбор флагов
-
-| Флаг | Полное имя | Что делает |
-| --- | --- | --- |
-| `-e` | `--editable` | Ставит пакет ссылкой на исходники, чтобы изменения в коде сразу подхватывались без переустановки |
-
-### Что ожидать
-
-- Установятся зависимости проекта: `numpy`, `opencv-python`, `matplotlib`, `plotly`, `pyyaml`, `pandas`.
-- Появятся CLI-команды `afn-run` и `afn-tune`.
-- Код пакета будет браться из текущей рабочей копии.
+- Если `uv` не установлен: `curl -LsSf https://astral.sh/uv/install.sh | sh`
+- Повторный `uv sync` после изменения `pyproject.toml` автоматически подхватывает новые зависимости.
 
 ### Важное замечание
 
-Именно после `pip install -e .` появляются entry-point команды:
+После `uv sync` **не нужно** активировать окружение вручную. Все команды запускаются через `uv run`, который автоматически использует `.venv`:
 
-- `afn-run`
-- `afn-tune`
-
-Они объявлены в `awesome-feature-navigation-solution/pyproject.toml`.
+```bash
+uv run afn-run ...
+uv run afn-tune ...
+```
 
 ---
 
 ## 2. Команды справки
 
-### Команда `afn-run --help`
+### Команда `uv run afn-run --help`
 
 ```bash
-afn-run --help
+uv run afn-run --help
 ```
 
 ### Зачем нужна
@@ -232,12 +165,12 @@ afn-run --help
 ### Что ожидать
 
 - Никакие файлы не создаются.
-- Появится список всех поддерживаемых флагов `afn-run`.
+- Появится список всех поддерживаемых флагов `uv run afn-run`.
 
-### Команда `afn-tune --help`
+### Команда `uv run afn-tune --help`
 
 ```bash
-afn-tune --help
+uv run afn-tune --help
 ```
 
 ### Зачем нужна
@@ -260,24 +193,23 @@ afn-tune --help
 Эти команды делают то же самое:
 
 ```bash
-python -m awesome_feature_navigation.cli --help
-python -m awesome_feature_navigation.tuner --help
+uv run python -m awesome_feature_navigation.cli --help
+uv run python -m awesome_feature_navigation.tuner --help
 ```
 
 Использовать их имеет смысл, если:
 
-- entry-point команда не попала в `PATH`;
-- ты хочешь явно запускать модуль через конкретный `python` из `.venv`;
-- тебе удобнее вызывать все через `.venv/bin/python -m ...`.
+- entry-point команда недоступна;
+- хочется явно запускать через `python -m`.
 
 ---
 
-## 3. Основная команда `afn-run`
+## 3. Основная команда `uv run afn-run`
 
 ### Базовый вид команды
 
 ```bash
-afn-run \
+uv run afn-run \
   --video ../resources/Left_cam.mp4 \
   --imu ../resources/imu_fixed.csv \
   --imu-time-scale 1e-9 \
@@ -301,7 +233,7 @@ afn-run \
 
 ### Когда ее запускать
 
-Запускай `afn-run`, когда:
+Запускай `uv run afn-run`, когда:
 
 - HSV-пороги уже подходят для твоего видео;
 - у тебя есть видео и, возможно, IMU;
@@ -310,15 +242,15 @@ afn-run \
 ### Синтаксис
 
 ```bash
-afn-run --video VIDEO [дополнительные флаги]
+uv run afn-run --video VIDEO [дополнительные флаги]
 ```
 
-### Полный разбор всех CLI-флагов `afn-run`
+### Полный разбор всех CLI-флагов `uv run afn-run`
 
 #### Флаг `-h`, `--help`
 
 ```bash
-afn-run --help
+uv run afn-run --help
 ```
 
 Назначение:
@@ -336,7 +268,7 @@ afn-run --help
 Пример:
 
 ```bash
-afn-run --video ../resources/Left_cam.mp4
+uv run afn-run --video ../resources/Left_cam.mp4
 ```
 
 Назначение:
@@ -370,7 +302,7 @@ afn-run --video ../resources/Left_cam.mp4
 Пример:
 
 ```bash
-afn-run --video ../resources/Left_cam.mp4 --imu ../resources/imu_fixed.csv
+uv run afn-run --video ../resources/Left_cam.mp4 --imu ../resources/imu_fixed.csv
 ```
 
 Назначение:
@@ -398,7 +330,7 @@ afn-run --video ../resources/Left_cam.mp4 --imu ../resources/imu_fixed.csv
 Пример:
 
 ```bash
-afn-run --video ../resources/Left_cam.mp4 --imu ../resources/imu_fixed.csv --imu-time-scale 1e-9
+uv run afn-run --video ../resources/Left_cam.mp4 --imu ../resources/imu_fixed.csv --imu-time-scale 1e-9
 ```
 
 Назначение:
@@ -429,7 +361,7 @@ afn-run --video ../resources/Left_cam.mp4 --imu ../resources/imu_fixed.csv --imu
 Пример:
 
 ```bash
-afn-run --video ../resources/Left_cam.mp4 --imu ../resources/imu_fixed.csv --imu-gyro-scale 0.017453292519943295
+uv run afn-run --video ../resources/Left_cam.mp4 --imu ../resources/imu_fixed.csv --imu-gyro-scale 0.017453292519943295
 ```
 
 Назначение:
@@ -458,7 +390,7 @@ afn-run --video ../resources/Left_cam.mp4 --imu ../resources/imu_fixed.csv --imu
 Пример:
 
 ```bash
-afn-run --video ../resources/Left_cam.mp4 --config examples/config.yaml
+uv run afn-run --video ../resources/Left_cam.mp4 --config examples/config.yaml
 ```
 
 Назначение:
@@ -481,7 +413,7 @@ afn-run --video ../resources/Left_cam.mp4 --config examples/config.yaml
 Пример:
 
 ```bash
-afn-run --video ../resources/Left_cam.mp4 --color red
+uv run afn-run --video ../resources/Left_cam.mp4 --color red
 ```
 
 Назначение:
@@ -511,7 +443,7 @@ afn-run --video ../resources/Left_cam.mp4 --color red
 Пример:
 
 ```bash
-afn-run --video ../resources/Left_cam.mp4 --color red --auto-color
+uv run afn-run --video ../resources/Left_cam.mp4 --color red --auto-color
 ```
 
 Назначение:
@@ -544,7 +476,7 @@ afn-run --video ../resources/Left_cam.mp4 --color red --auto-color
 Пример:
 
 ```bash
-afn-run \
+uv run afn-run \
   --video ../resources/Left_cam.mp4 \
   --imu ../resources/imu_fixed.csv \
   --imu-time-scale 1e-9 \
@@ -577,7 +509,7 @@ afn-run \
 Пример:
 
 ```bash
-afn-run --video ../resources/Left_cam.mp4 --out trajectory
+uv run afn-run --video ../resources/Left_cam.mp4 --out trajectory
 ```
 
 Назначение:
@@ -600,7 +532,7 @@ afn-run --video ../resources/Left_cam.mp4 --out trajectory
 Пример:
 
 ```bash
-afn-run \
+uv run afn-run \
   --video ../resources/Left_cam.mp4 \
   --imu ../resources/imu_fixed.csv \
   --imu-time-scale 1e-9 \
@@ -628,7 +560,7 @@ afn-run \
 - выполнение может занять больше времени;
 - размер результата может быть большим, особенно для длинного ролика.
 
-### Какие файлы создает `afn-run`
+### Какие файлы создает `uv run afn-run`
 
 Минимальный набор:
 
@@ -668,7 +600,7 @@ afn-run \
 ### Пример минимального рабочего запуска без IMU
 
 ```bash
-afn-run \
+uv run afn-run \
   --video ../resources/Left_cam.mp4 \
   --color red \
   --auto-color \
@@ -689,7 +621,7 @@ afn-run \
 ### Пример стандартного запуска с IMU
 
 ```bash
-afn-run \
+uv run afn-run \
   --video ../resources/Left_cam.mp4 \
   --imu ../resources/imu_fixed.csv \
   --imu-time-scale 1e-9 \
@@ -704,7 +636,7 @@ afn-run \
 ### Пример запуска для `Right_cam`
 
 ```bash
-afn-run \
+uv run afn-run \
   --video ../resources/Right_cam.mp4 \
   --imu ../resources/imu_fixed.csv \
   --config examples/right_cam.yaml \
@@ -716,7 +648,7 @@ afn-run \
 - будут использованы параметры IMU и loop-усреднения из `examples/right_cam.yaml`;
 - если в конфиге включен `loop_average`, появятся дополнительные `_raw` и `_laps` файлы.
 
-### Типичные ошибки при `afn-run`
+### Типичные ошибки при `uv run afn-run`
 
 #### Ошибка: видео не открывается
 
@@ -758,12 +690,12 @@ afn-run \
 
 ---
 
-## 4. Интерактивная команда `afn-tune`
+## 4. Интерактивная команда `uv run afn-tune`
 
 ### Базовый вид команды
 
 ```bash
-afn-tune \
+uv run afn-tune \
   --video ../resources/Left_cam.mp4 \
   --config examples/config.yaml \
   --color red \
@@ -785,19 +717,19 @@ afn-tune \
 
 ### Когда ее запускать
 
-Запускай `afn-tune`, когда:
+Запускай `uv run afn-tune`, когда:
 
 - линия плохо выделяется;
 - ты не уверен, какой цветовой пресет нужен;
 - нужно вручную настроить HSV;
 - нужно сохранить рабочий YAML для конкретной камеры или видео.
 
-### Полный разбор всех CLI-флагов `afn-tune`
+### Полный разбор всех CLI-флагов `uv run afn-tune`
 
 #### Флаг `-h`, `--help`
 
 ```bash
-afn-tune --help
+uv run afn-tune --help
 ```
 
 Назначение:
@@ -809,7 +741,7 @@ afn-tune --help
 Пример:
 
 ```bash
-afn-tune --video ../resources/Left_cam.mp4
+uv run afn-tune --video ../resources/Left_cam.mp4
 ```
 
 Назначение:
@@ -830,7 +762,7 @@ afn-tune --video ../resources/Left_cam.mp4
 Пример:
 
 ```bash
-afn-tune --video ../resources/Left_cam.mp4 --config examples/config.yaml
+uv run afn-tune --video ../resources/Left_cam.mp4 --config examples/config.yaml
 ```
 
 Назначение:
@@ -853,7 +785,7 @@ afn-tune --video ../resources/Left_cam.mp4 --config examples/config.yaml
 Пример:
 
 ```bash
-afn-tune --video ../resources/Left_cam.mp4 --color red
+uv run afn-tune --video ../resources/Left_cam.mp4 --color red
 ```
 
 Назначение:
@@ -870,7 +802,7 @@ afn-tune --video ../resources/Left_cam.mp4 --color red
 Пример:
 
 ```bash
-afn-tune --video ../resources/Left_cam.mp4 --config examples/config.yaml --color red --auto-color
+uv run afn-tune --video ../resources/Left_cam.mp4 --config examples/config.yaml --color red --auto-color
 ```
 
 Назначение:
@@ -882,7 +814,7 @@ afn-tune --video ../resources/Left_cam.mp4 --config examples/config.yaml --color
 - `Auto` будет включен сразу после старта;
 - состояние можно потом изменить трекбаром.
 
-### Управление в окне `afn-tune`
+### Управление в окне `uv run afn-tune`
 
 Клавиши:
 
@@ -915,7 +847,7 @@ afn-tune --video ../resources/Left_cam.mp4 --config examples/config.yaml --color
 ### Практический сценарий использования
 
 ```bash
-afn-tune \
+uv run afn-tune \
   --video ../resources/Right_cam.mp4 \
   --config examples/right_cam.yaml \
   --color blue
@@ -973,7 +905,7 @@ python check-info.py
 
 ### Когда запускать
 
-Запускай перед `afn-run`, если хочешь понять:
+Запускай перед `uv run afn-run`, если хочешь понять:
 
 - насколько совпадают длительности видео и IMU;
 - в каких единицах времени может быть IMU;
@@ -995,7 +927,7 @@ python check-info.py
 Если скрипт пишет, что timestamps очень большие, это почти всегда означает, что:
 
 - IMU хранит время в наносекундах;
-- `afn-run` нужно запускать с `--imu-time-scale 1e-9`.
+- `uv run afn-run` нужно запускать с `--imu-time-scale 1e-9`.
 
 ---
 
@@ -1035,7 +967,7 @@ python fix_imu.py
 
 - будет создан или перезаписан файл `resources/imu_fixed.csv`;
 - timestamps в выходном CSV будут начинаться с нуля;
-- выходной файл удобно подавать в `afn-run`.
+- выходной файл удобно подавать в `uv run afn-run`.
 
 ### Когда запускать
 
@@ -1061,7 +993,7 @@ python fix_imu.py
 После `python fix_imu.py` следующий типичный шаг:
 
 ```bash
-afn-run \
+uv run afn-run \
   --video ../resources/Left_cam.mp4 \
   --imu ../resources/imu_fixed.csv \
   --imu-time-scale 1e-9 \
@@ -1075,12 +1007,12 @@ afn-run \
 
 ## 7. Эквиваленты CLI через `python -m`
 
-Если entry-point команды не работают или ты хочешь явно указывать Python из конкретной `.venv`, используй такие формы:
+Если хочется явно вызывать через `python -m`, используй `uv run python -m`:
 
-### Эквивалент `afn-run`
+### Эквивалент `uv run afn-run`
 
 ```bash
-python -m awesome_feature_navigation.cli \
+uv run python -m awesome_feature_navigation.cli \
   --video ../resources/Left_cam.mp4 \
   --imu ../resources/imu_fixed.csv \
   --imu-time-scale 1e-9 \
@@ -1090,29 +1022,24 @@ python -m awesome_feature_navigation.cli \
   --out trajectory
 ```
 
-### Эквивалент `afn-tune`
+### Эквивалент `uv run afn-tune`
 
 ```bash
-python -m awesome_feature_navigation.tuner \
+uv run python -m awesome_feature_navigation.tuner \
   --video ../resources/Left_cam.mp4 \
   --config examples/config.yaml \
   --color red \
   --auto-color
 ```
 
-### Когда это полезно
-
-- если `afn-run` и `afn-tune` не видны в `PATH`;
-- если у тебя несколько Python-окружений;
-- если хочется запускать строго через `.venv/bin/python`.
-
 ### Пример из корня репозитория
 
 ```bash
-.venv/bin/python -m awesome_feature_navigation.cli \
-  --video resources/Right_cam.mp4 \
-  --imu resources/imu_fixed.csv \
-  --config awesome-feature-navigation-solution/examples/right_cam.yaml \
+cd awesome-feature-navigation-solution
+uv run python -m awesome_feature_navigation.cli \
+  --video ../resources/Right_cam.mp4 \
+  --imu ../resources/imu_fixed.csv \
+  --config examples/right_cam.yaml \
   --out right_cam
 ```
 
@@ -1122,7 +1049,7 @@ python -m awesome_feature_navigation.tuner \
 
 Пользователь спрашивал именно про команды и флаги, но для этого проекта этого недостаточно: значительная часть поведения управляется полями YAML.
 
-Ниже перечислены ключевые поля, потому что без них невозможно строго понять, чего ожидать от `afn-run`.
+Ниже перечислены ключевые поля, потому что без них невозможно строго понять, чего ожидать от `uv run afn-run`.
 
 ## 8.1. Поля детекции линии
 
@@ -1443,18 +1370,15 @@ imu_accel_axes: [x, -z, y]
 
 ```bash
 cd awesome-feature-navigation-solution
-python -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -e .
-afn-tune --video ../resources/Left_cam.mp4 --config examples/config.yaml --color red --auto-color
-afn-run --video ../resources/Left_cam.mp4 --imu ../resources/imu_fixed.csv --imu-time-scale 1e-9 --color red --auto-color --config examples/config.yaml --out trajectory
+uv sync
+uv run afn-tune --video ../resources/Left_cam.mp4 --config examples/config.yaml --color red --auto-color
+uv run afn-run --video ../resources/Left_cam.mp4 --imu ../resources/imu_fixed.csv --imu-time-scale 1e-9 --color red --auto-color --config examples/config.yaml --out trajectory
 ```
 
 Что ожидать:
 
-- после `afn-tune` ты сможешь сохранить рабочий YAML;
-- после `afn-run` появятся `trajectory.csv` и `trajectory.html`.
+- после `uv run afn-tune` ты сможешь сохранить рабочий YAML;
+- после `uv run afn-run` появятся `trajectory.csv` и `trajectory.html`.
 
 ### 9.2. Проверить исходные данные
 
@@ -1482,7 +1406,7 @@ python fix_imu.py
 ### 9.4. Финальный запуск из корня репозитория
 
 ```bash
-.venv/bin/python -m awesome_feature_navigation.cli \
+uv run python -m awesome_feature_navigation.cli \
   --video resources/Right_cam.mp4 \
   --imu resources/imu_fixed.csv \
   --config awesome-feature-navigation-solution/examples/right_cam.yaml \
@@ -1498,13 +1422,13 @@ python fix_imu.py
 
 ## 10. Что важно помнить перед запуском
 
-### Про `afn-run`
+### Про `uv run afn-run`
 
 - Это не интерактивная команда.
 - Она не показывает progress bar.
 - Она просто работает и в конце печатает `Saved: ...`.
 
-### Про `afn-tune`
+### Про `uv run afn-tune`
 
 - Это интерактивная GUI-команда.
 - Она не подходит для чисто headless-сервера без окон.
@@ -1533,14 +1457,11 @@ python fix_imu.py
 
 | Команда | Когда запускать | Что получишь |
 | --- | --- | --- |
-| `python -m venv .venv` | Один раз на старте | Виртуальное окружение |
-| `source .venv/bin/activate` | Каждый новый терминал | Активное окружение |
-| `pip install -U pip` | После активации | Обновленный `pip` |
-| `pip install -e .` | После создания `.venv` | Установленный пакет и CLI |
-| `afn-run --help` | Если нужна справка | Список флагов `afn-run` |
-| `afn-tune --help` | Если нужна справка | Список флагов `afn-tune` |
-| `afn-tune ...` | Если надо настроить HSV | Окно тюнера и, при `s`, сохраненный YAML |
-| `afn-run ...` | Если надо получить траекторию | `csv`, `html`, иногда debug и loop-диагностика |
+| `uv sync` | Один раз на старте (и после изменений зависимостей) | Установленный пакет и CLI |
+| `uv run afn-run --help` | Если нужна справка | Список флагов `uv run afn-run` |
+| `uv run afn-tune --help` | Если нужна справка | Список флагов `uv run afn-tune` |
+| `uv run afn-tune ...` | Если надо настроить HSV | Окно тюнера и, при `s`, сохраненный YAML |
+| `uv run afn-run ...` | Если надо получить траекторию | `csv`, `html`, иногда debug и loop-диагностика |
 | `python check-info.py` | Перед первым запуском IMU | Диагностика длительности видео и IMU |
 | `python fix_imu.py` | Если timestamps IMU абсолютные | `resources/imu_fixed.csv` |
 
@@ -1550,9 +1471,9 @@ python fix_imu.py
 
 Если отвечать максимально строго и коротко:
 
-- у пакета есть две основные команды: `afn-run` и `afn-tune`;
+- у пакета есть две основные команды: `uv run afn-run` и `uv run afn-tune`;
 - у репозитория есть два вспомогательных скрипта: `python check-info.py` и `python fix_imu.py`;
-- всё остальное, что ты будешь запускать, это либо подготовка окружения (`venv`, `pip`), либо эквиваленты тех же команд через `python -m`.
+- всё остальное — это либо `uv sync` для подготовки окружения, либо эквиваленты через `uv run python -m`.
 
 Если нужно начать прямо сейчас с рабочего минимального сценария, используй такой порядок:
 
@@ -1561,12 +1482,9 @@ cd awesome-feature-navigation
 python check-info.py
 python fix_imu.py
 cd awesome-feature-navigation-solution
-python -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -e .
-afn-tune --video ../resources/Left_cam.mp4 --config examples/config.yaml --color red --auto-color
-afn-run --video ../resources/Left_cam.mp4 --imu ../resources/imu_fixed.csv --imu-time-scale 1e-9 --color red --auto-color --config examples/config.yaml --out trajectory
+uv sync
+uv run afn-tune --video ../resources/Left_cam.mp4 --config examples/config.yaml --color red --auto-color
+uv run afn-run --video ../resources/Left_cam.mp4 --imu ../resources/imu_fixed.csv --imu-time-scale 1e-9 --color red --auto-color --config examples/config.yaml --out trajectory
 ```
 
 Это самый прямой и понятный маршрут по текущему проекту.

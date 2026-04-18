@@ -8,13 +8,10 @@
 
 ```bash
 cd awesome-feature-navigation-solution
-python -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -e .
+uv sync
 
-afn-tune --video ../resources/Left_cam.mp4 --config examples/config.yaml --color red --auto-color
-afn-run --video ../resources/Left_cam.mp4 --imu ../resources/imu_fixed.csv --imu-time-scale 1e-9 --color red --auto-color --config examples/config.yaml --out trajectory
+uv run afn-tune --video ../resources/Left_cam.mp4 --config examples/config.yaml --color red --auto-color
+uv run afn-run --video ../resources/Left_cam.mp4 --imu ../resources/imu_fixed.csv --imu-time-scale 1e-9 --color red --auto-color --config examples/config.yaml --out trajectory
 ```
 
 Подробная инструкция:

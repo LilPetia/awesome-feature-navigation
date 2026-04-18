@@ -14,10 +14,7 @@ Python-проект для оценки **2D траектории** по:
 ## Установка
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -U pip
-pip install -e .
+uv sync
 ```
 
 ## Быстрый Старт
@@ -25,7 +22,7 @@ pip install -e .
 Прогон по видео и IMU:
 
 ```bash
-afn-run \
+uv run afn-run \
   --video ../resources/Left_cam.mp4 \
   --imu ../resources/imu_fixed.csv \
   --imu-time-scale 1e-9 \
@@ -45,7 +42,7 @@ afn-run \
 Для ручной настройки есть интерактивный тюнер:
 
 ```bash
-afn-tune --video ../resources/Left_cam.mp4 --config examples/config.yaml --color red --auto-color
+uv run afn-tune --video ../resources/Left_cam.mp4 --config examples/config.yaml --color red --auto-color
 ```
 
 Что делает тюнер:
@@ -116,9 +113,9 @@ max_frames: 0
 Если в одном проекте видео разные, можно не переписывать код, а просто запускать:
 
 ```bash
-afn-run --video video_red.mp4 --color red --auto-color --out red_run
-afn-run --video video_blue.mp4 --color blue --auto-color --out blue_run
-afn-run --video video_white.mp4 --color white --auto-color --out white_run
+uv run afn-run --video video_red.mp4 --color red --auto-color --out red_run
+uv run afn-run --video video_blue.mp4 --color blue --auto-color --out blue_run
+uv run afn-run --video video_white.mp4 --color white --auto-color --out white_run
 ```
 
 ## IMU CSV
@@ -131,7 +128,7 @@ afn-run --video video_white.mp4 --color white --auto-color --out white_run
 Если IMU timestamps хранятся в наносекундах:
 
 ```bash
-afn-run --video path/to/video.mp4 --imu path/to/imu.csv --imu-time-scale 1e-9
+uv run afn-run --video path/to/video.mp4 --imu path/to/imu.csv --imu-time-scale 1e-9
 ```
 
 ## Что Внутри
