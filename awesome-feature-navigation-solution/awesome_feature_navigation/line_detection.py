@@ -29,6 +29,65 @@ def _fit_direction(points_xy: np.ndarray) -> float:
         angle = float(np.arctan2(-v[0], v[1]))
     return angle
 
+
+def _vector_to_angle(vec_xy: np.ndarray) -> float:
+    vec = np.asarray(vec_xy, dtype=np.float64).reshape(2)
+    norm = float(np.linalg.norm(vec))
+    if norm < 1e-9:
+        return float('nan')
+    return float(np.arctan2(vec[0], -vec[1]))
+
+
+def _fit_local_direction(points_xy: np.ndarray, fraction: float, min_points: int) -> float:
+    if points_xy.shape[0] < 2:
+        return float('nan')
+    pts = points_xy.astype(np.float64)
+    clamped_fraction = float(np.clip(fraction, 0.05, 1.0))
+    count = max(int(min_points), int(round(pts.shape[0] * clamped_fraction)))
+    count = min(count, pts.shape[0])
+    if count < 2:
+        return float('nan')
+    segment = pts[-count:]
+    deltas = np.diff(segment, axis=0)
+    valid = np.sqrt(np.sum(deltas * deltas, axis=1)) > 1e-9
+    if not np.any(valid):
+        return _vector_to_angle(segment[0] - segment[-1])
+    # The robot follows the tangent near the bottom of the frame, so use the
+    # local segment direction instead of the full visible curve.
+    forward_vec = -deltas[valid].mean(axis=0)
+    return _vector_to_angle(forward_vec)
+
+
+def _blend_angles(primary: float, secondary: float, secondary_weight: float) -> float:
+    if not np.isfinite(primary):
+        return float(secondary)
+    if not np.isfinite(secondary):
+        return float(primary)
+    weight = float(np.clip(secondary_weight, 0.0, 1.0))
+    primary_vec = np.array([np.cos(primary), np.sin(primary)], dtype=np.float64)
+    secondary_vec = np.array([np.cos(secondary), np.sin(secondary)], dtype=np.float64)
+    mixed = (1.0 - weight) * primary_vec + weight * secondary_vec
+    norm = float(np.linalg.norm(mixed))
+    if norm < 1e-9:
+        return float(primary)
+    mixed /= norm
+    return float(np.arctan2(mixed[1], mixed[0]))
+
+
+def _measure_bottom_x(points_xy: np.ndarray, fraction: float, min_points: int, statistic: str) -> float:
+    if points_xy.shape[0] == 0:
+        return float('nan')
+    pts = points_xy.astype(np.float64)
+    clamped_fraction = float(np.clip(fraction, 0.0, 1.0))
+    if clamped_fraction <= 0.0:
+        return float(pts[-1, 0])
+    count = max(int(min_points), int(round(pts.shape[0] * clamped_fraction)))
+    count = min(count, pts.shape[0])
+    window_x = pts[-count:, 0]
+    if statistic == 'mean':
+        return float(np.mean(window_x))
+    return float(np.median(window_x))
+
 def _clip_hsv_triplet(values: Sequence[int]) -> np.ndarray:
     arr = np.asarray(values, dtype=int).reshape(3)
     arr[0] = int(np.clip(arr[0], 0, 180))
@@ -215,11 +274,32 @@ class LineDetector:
         elif points_xy.shape[0] >= self.min_pixels:
             self.prev_centerline = centerline_img.copy()
         if points_xy.shape[0] >= 2:
-            angle = _fit_direction(points_xy)
+            global_angle = _fit_direction(points_xy)
+            local_angle = _fit_local_direction(
+                points_xy,
+                fraction=float(cfg.get('line_angle_window_fraction', 0.35) or 0.35),
+                min_points=int(cfg.get('line_angle_window_min_points', 8) or 8),
+            )
+            angle_mode = str(cfg.get('line_angle_mode', 'pca') or 'pca').strip().lower()
+            if angle_mode == 'bottom_segment':
+                angle = local_angle
+            elif angle_mode == 'blend':
+                angle = _blend_angles(
+                    primary=global_angle,
+                    secondary=local_angle,
+                    secondary_weight=float(cfg.get('line_angle_local_weight', 0.75) or 0.75),
+                )
+            else:
+                angle = global_angle
         else:
             angle = float('nan')
         if points_xy.shape[0] > 0:
-            bottom_x = float(points_xy[-1][0])
+            bottom_x = _measure_bottom_x(
+                points_xy,
+                fraction=float(cfg.get('line_bottom_window_fraction', 0.0) or 0.0),
+                min_points=int(cfg.get('line_bottom_window_min_points', 6) or 6),
+                statistic=str(cfg.get('line_bottom_window_statistic', 'median') or 'median').strip().lower(),
+            )
         else:
             bottom_x = float('nan')
         return TapeObservation(centerline_px=points_xy, angle_rad=angle, bottom_x=bottom_x, shape_hw=(h, w), mask=clean_mask, centerline_mask=centerline_img)

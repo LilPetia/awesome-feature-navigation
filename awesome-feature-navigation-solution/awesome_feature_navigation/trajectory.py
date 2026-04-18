@@ -490,6 +490,83 @@ def _build_canonical_loop(
     return (control_xy, loop_xy)
 
 
+def _segments_strictly_intersect(a: np.ndarray, b: np.ndarray, c: np.ndarray, d: np.ndarray) -> bool:
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    c = np.asarray(c, dtype=float)
+    d = np.asarray(d, dtype=float)
+
+    def orient(p: np.ndarray, q: np.ndarray, r: np.ndarray) -> float:
+        return float((q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]))
+
+    o1 = orient(a, b, c)
+    o2 = orient(a, b, d)
+    o3 = orient(c, d, a)
+    o4 = orient(c, d, b)
+    return ((o1 > 0.0 and o2 < 0.0) or (o1 < 0.0 and o2 > 0.0)) and ((o3 > 0.0 and o4 < 0.0) or (o3 < 0.0 and o4 > 0.0))
+
+
+def _count_self_intersections(points_xy: np.ndarray) -> int:
+    pts = np.asarray(points_xy, dtype=float)
+    if pts.shape[0] < 4:
+        return 0
+    if np.allclose(pts[0], pts[-1]):
+        pts = pts[:-1]
+    count = int(pts.shape[0])
+    if count < 4:
+        return 0
+    intersections = 0
+    for i in range(count):
+        a = pts[i]
+        b = pts[(i + 1) % count]
+        for j in range(i + 2, count):
+            if i == 0 and j == count - 1:
+                continue
+            c = pts[j]
+            d = pts[(j + 1) % count]
+            if _segments_strictly_intersect(a, b, c, d):
+                intersections += 1
+    return intersections
+
+
+def _build_representative_lap_loop(
+    laps: Sequence[tuple[int, float, float, np.ndarray]],
+    aligned_laps: Sequence[np.ndarray],
+    alignment_rmses: Sequence[float],
+    keep_mask: Sequence[bool],
+    harmonics: int,
+    anchor: str,
+    control_count: int,
+    reference_period: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    best_candidate: Optional[tuple[float, np.ndarray, np.ndarray]] = None
+    for (lap_index, t0, t1, _), aligned_xy, alignment_rmse, keep in zip(laps, aligned_laps, alignment_rmses, keep_mask):
+        if not keep:
+            continue
+        loop_body = _center_points(aligned_xy)
+        if anchor:
+            anchor_idx = _choose_loop_anchor(loop_body, anchor)
+            if anchor_idx:
+                loop_body = np.roll(loop_body, -anchor_idx, axis=0)
+        smoothed_body = _fourier_smooth_closed_path(loop_body, harmonics=harmonics)
+        closure = float(np.linalg.norm(smoothed_body[0] - smoothed_body[-1]))
+        self_intersections = _count_self_intersections(smoothed_body)
+        duration_penalty = float(abs((t1 - t0) - reference_period))
+        # Favor full observed laps that stay closed after smoothing and avoid synthetic self-crossings.
+        score = float(alignment_rmse) + 0.4 * closure + 0.04 * duration_penalty + 10.0 * float(self_intersections)
+        control_xy = _resample_closed_polyline_by_arclength(smoothed_body, control_count)
+        loop_xy = np.vstack((smoothed_body, smoothed_body[0]))
+        origin = loop_xy[0].copy()
+        loop_xy -= origin
+        control_xy -= origin
+        candidate = (score, control_xy, loop_xy)
+        if best_candidate is None or score < best_candidate[0]:
+            best_candidate = candidate
+    if best_candidate is None:
+        raise ValueError('No representative lap candidates available.')
+    return (best_candidate[1], best_candidate[2])
+
+
 def _project_points_to_closed_path(
     points_xy: np.ndarray,
     path_xy: np.ndarray,
@@ -545,6 +622,7 @@ def _canonicalize_periodic_trajectory(
     statistic = str(cfg.get('loop_average_statistic', 'median') or 'median').strip().lower()
     if statistic not in {'mean', 'median'}:
         statistic = 'median'
+    loop_strategy = str(cfg.get('loop_strategy', 'average_spline') or 'average_spline').strip().lower()
     anchor = str(cfg.get('loop_start_anchor', 'bottom_left') or 'bottom_left').strip()
     laps, split_times = _extract_anchor_laps(
         traj,
@@ -610,13 +688,25 @@ def _canonicalize_periodic_trajectory(
         [aligned_xy for aligned_xy, keep in zip(final_aligned_laps, keep_mask) if keep],
         axis=0,
     )
-    control_xy, loop_xy = _build_canonical_loop(
-        aligned_stack,
-        harmonics=harmonics,
-        anchor=anchor,
-        statistic=statistic,
-        control_count=control_count,
-    )
+    if loop_strategy == 'representative_lap':
+        control_xy, loop_xy = _build_representative_lap_loop(
+            laps=laps,
+            aligned_laps=final_aligned_laps,
+            alignment_rmses=final_rmses,
+            keep_mask=keep_mask,
+            harmonics=harmonics,
+            anchor=anchor,
+            control_count=control_count,
+            reference_period=lap_period,
+        )
+    else:
+        control_xy, loop_xy = _build_canonical_loop(
+            aligned_stack,
+            harmonics=harmonics,
+            anchor=anchor,
+            statistic=statistic,
+            control_count=control_count,
+        )
     spline_path = loop_xy[:-1]
     for aligned_xy in final_aligned_laps:
         projected_xy, projection_rmse = _project_points_to_closed_path(
@@ -718,6 +808,7 @@ def estimate_trajectory_with_details(
     x, y, yaw = (0.0, 0.0, 0.0)
     v_forward = float(cfg.get('forward_speed_mps', 0.25))
     k_yaw = float(cfg.get('vision_yaw_gain', 0.08))
+    k_yaw_nonlinear = float(cfg.get('vision_yaw_nonlinear_gain', 0.0) or 0.0)
     yaw_max = float(cfg.get('vision_yaw_max_correction', 0.12))
     k_lat = float(cfg.get('vision_lateral_gain', 0.002))
     vision_smoothing_frames = int(cfg.get('vision_smoothing_frames', 20))
@@ -765,7 +856,12 @@ def estimate_trajectory_with_details(
         h, w = obs.shape_hw
         cx_img = w * 0.5
         if np.isfinite(obs.angle_rad):
-            corr = _clamp(k_yaw * float(obs.angle_rad), -yaw_max, yaw_max) * dt_frame
+            yaw_error = float(obs.angle_rad)
+            yaw_cmd = k_yaw * yaw_error
+            if k_yaw_nonlinear != 0.0:
+                # Amplify larger heading errors without over-steering on straights.
+                yaw_cmd += k_yaw_nonlinear * yaw_error * abs(yaw_error)
+            corr = _clamp(yaw_cmd, -yaw_max, yaw_max) * dt_frame
             yaw += corr
         if np.isfinite(obs.bottom_x):
             err_px = float(obs.bottom_x - cx_img)

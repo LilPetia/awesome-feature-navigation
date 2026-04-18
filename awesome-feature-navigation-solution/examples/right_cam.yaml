@@ -3,10 +3,13 @@ auto_color_tune: false
 hsv_ranges:
   - [94, 85, 120, 115, 255, 255]
 vision_yaw_gain: 0.08
+vision_yaw_nonlinear_gain: 0.25
 vision_yaw_max_correction: 0.12
 vision_lateral_gain: 0.002
 vision_smoothing_frames: 20
 centerline_smooth_window: 11
+line_angle_mode: pca
+line_bottom_window_fraction: 0.0
 forward_speed_mps: 0.25
 max_frames: 0
 imu_time_scale: 1.0e-9
@@ -16,7 +19,8 @@ imu_yaw_axis: z
 imu_yaw_only: true
 imu_yaw_bias_window_sec: 1.0
 loop_average: true
-loop_period_sec: 44.5
+loop_strategy: representative_lap
+loop_period_sec: 40.0
 loop_samples: 512
 loop_min_fraction: 0.6
 loop_fourier_harmonics: 3
