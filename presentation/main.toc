@@ -1,0 +1,5 @@
+\babel@toc {russian}{}\relax 
+\beamer@sectionintoc {1}{МТС True Tech Champ}{3}{0}{1}
+\beamer@sectionintoc {2}{Картография}{11}{0}{2}
+\beamer@sectionintoc {3}{Выводы}{16}{0}{3}
+\beamer@sectionintoc {4}{Планы}{17}{0}{4}
