@@ -5,8 +5,8 @@ from typing import Dict, Optional
 import yaml
 from .imu_io import calibrate_imu_samples, load_imu_csv
 from .line_detection import SUPPORTED_COLORS
-from .trajectory import estimate_trajectory
-from .plotting import save_trajectory_csv, save_trajectory_plot
+from .plotting import save_loop_debug_csv, save_loop_debug_plot, save_trajectory_csv, save_trajectory_plot
+from .trajectory import estimate_trajectory_with_details
 
 def _load_cfg(path: Optional[str]) -> Dict:
     cfg: Dict = {}
@@ -45,15 +45,32 @@ def main() -> None:
         imu_samples = calibrate_imu_samples(imu_samples, cfg)
     debug_path = None
     if args.save_debug:
-        debug_path = str(out_prefix.with_suffix('_debug.mp4'))
         debug_path = str(Path(str(out_prefix) + '_debug.mp4'))
-    traj = estimate_trajectory(video_path=args.video, imu_samples=imu_samples, cfg=cfg, save_debug_video=debug_path)
+    result = estimate_trajectory_with_details(
+        video_path=args.video,
+        imu_samples=imu_samples,
+        cfg=cfg,
+        save_debug_video=debug_path,
+    )
     csv_path = str(Path(str(out_prefix) + '.csv'))
-    png_path = str(Path(str(out_prefix) + '.html'))
-    save_trajectory_csv(traj, csv_path)
-    save_trajectory_plot(traj, png_path)
+    html_path = str(Path(str(out_prefix) + '.html'))
+    save_trajectory_csv(result.final_traj, csv_path)
+    save_trajectory_plot(result.final_traj, html_path)
     print(f'Saved: {csv_path}')
-    print(f'Saved: {png_path}')
+    print(f'Saved: {html_path}')
+    if result.loop_debug is not None:
+        raw_csv_path = str(Path(str(out_prefix) + '_raw.csv'))
+        raw_html_path = str(Path(str(out_prefix) + '_raw.html'))
+        laps_csv_path = str(Path(str(out_prefix) + '_laps.csv'))
+        laps_html_path = str(Path(str(out_prefix) + '_laps.html'))
+        save_trajectory_csv(result.raw_traj, raw_csv_path)
+        save_trajectory_plot(result.raw_traj, raw_html_path, title='Raw Trajectory Before Loop Averaging')
+        save_loop_debug_csv(result.loop_debug, laps_csv_path)
+        save_loop_debug_plot(result.loop_debug, laps_html_path)
+        print(f'Saved: {raw_csv_path}')
+        print(f'Saved: {raw_html_path}')
+        print(f'Saved: {laps_csv_path}')
+        print(f'Saved: {laps_html_path}')
     if debug_path is not None:
         print(f'Saved: {debug_path}')
 if __name__ == '__main__':

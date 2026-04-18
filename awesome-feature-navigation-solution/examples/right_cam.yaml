@@ -20,4 +20,11 @@ loop_period_sec: 44.5
 loop_samples: 512
 loop_min_fraction: 0.6
 loop_fourier_harmonics: 3
+loop_refine_iterations: 3
+loop_similarity_align: true
+loop_phase_search_fraction: 0.15
+loop_anchor_search_fraction: 0.35
+loop_projection_search_fraction: 0.08
+loop_average_statistic: median
+loop_spline_control_points: 24
 loop_start_anchor: bottom_left
