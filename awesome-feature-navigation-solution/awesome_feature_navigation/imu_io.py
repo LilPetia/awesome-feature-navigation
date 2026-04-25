@@ -6,9 +6,11 @@ import pandas as pd
 from .imu_preintegration import IMUSample
 
 def _norm(s: str) -> str:
+    """Привести имя колонки к каноничному виду: lower-case, только буквы/цифры/'_'."""
     return ''.join((ch for ch in s.lower() if ch.isalnum() or ch in '_'))
 
 def _pick_col(cols: List[str], candidates: Sequence[str]) -> Optional[str]:
+    """Найти колонку из cols, чьё нормализованное имя совпадает (или содержит) кандидата."""
     norm_map = {_norm(c): c for c in cols}
     for cand in candidates:
         key = _norm(cand)
@@ -22,6 +24,7 @@ def _pick_col(cols: List[str], candidates: Sequence[str]) -> Optional[str]:
     return None
 
 def _parse_axis_spec(spec: str) -> Tuple[int, float]:
+    """Разобрать спецификацию оси вида '+x'/'-z' в индекс (0/1/2) и знак (+1/-1)."""
     token = spec.strip().lower()
     sign = 1.0
     if token.startswith('-'):
@@ -35,6 +38,7 @@ def _parse_axis_spec(spec: str) -> Tuple[int, float]:
     return (axis_map[token], sign)
 
 def _apply_axis_map(values: np.ndarray, axis_specs: Sequence[str]) -> np.ndarray:
+    """Переставить/инвертировать оси массива (N, 3) по списку спецификаций ['+x','-z','+y']."""
     if len(axis_specs) != 3:
         raise ValueError(f'Axis map must contain 3 entries, got {axis_specs}')
     mapped = np.zeros_like(values, dtype=float)
@@ -44,6 +48,7 @@ def _apply_axis_map(values: np.ndarray, axis_specs: Sequence[str]) -> np.ndarray
     return mapped
 
 def _rotation_from_a_to_b(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Матрица 3x3 поворота, переводящая единичный вектор a в единичный вектор b (формула Rodrigues)."""
     a = np.asarray(a, dtype=float).reshape(3)
     b = np.asarray(b, dtype=float).reshape(3)
     a_norm = float(np.linalg.norm(a))
@@ -69,6 +74,7 @@ def _rotation_from_a_to_b(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return np.eye(3) + K + (K @ K) * ((1.0 - c) / (s * s))
 
 def load_imu_csv(path: str, time_scale: float=1.0, gyro_scale: float=1.0) -> List[IMUSample]:
+    """Загрузить IMU-сэмплы из CSV (автоопределение колонок); time_scale/gyro_scale — единицы."""
     df = pd.read_csv(path)
     cols = list(df.columns)
     t_col = _pick_col(cols, ['t', 'time', 'timestamp', 'sec', 'seconds', 'stamp'])
@@ -96,6 +102,7 @@ def load_imu_csv(path: str, time_scale: float=1.0, gyro_scale: float=1.0) -> Lis
     return samples
 
 def calibrate_imu_samples(samples: Sequence[IMUSample], cfg: Mapping[str, object]) -> List[IMUSample]:
+    """Применить калибровку IMU из cfg: переориентация осей, вычитание bias, выравнивание гравитации, фильтр yaw."""
     if not samples:
         return []
     t = np.array([s.t for s in samples], dtype=float)
@@ -138,6 +145,7 @@ def calibrate_imu_samples(samples: Sequence[IMUSample], cfg: Mapping[str, object
     return calibrated
 
 def slice_imu(samples: Sequence[IMUSample], t0: float, t1: float, start_idx: int=0) -> Tuple[List[IMUSample], int]:
+    """Выделить IMU-сэмплы во временном окне [t0, t1] с подхватом соседей; возвращает срез и новый start_idx."""
     n = len(samples)
     i = start_idx
     while i < n and samples[i].t < t0:

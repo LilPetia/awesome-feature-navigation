@@ -52,10 +52,12 @@ class TrajectoryEstimateResult:
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
+    """Ограничить x отрезком [lo, hi]."""
     return float(max(lo, min(hi, x)))
 
 
 def _rigid_align_points(points_xy: np.ndarray, ref_xy: np.ndarray) -> np.ndarray:
+    """Жёстко выровнять points_xy к ref_xy (поворот + сдвиг) методом Кабша через SVD."""
     src = np.asarray(points_xy, dtype=float)
     ref = np.asarray(ref_xy, dtype=float)
     src_center = src.mean(axis=0, keepdims=True)
@@ -77,6 +79,7 @@ def _similarity_align_points(
     ref_xy: np.ndarray,
     scale_limits: tuple[float, float]=(0.5, 2.0),
 ) -> tuple[np.ndarray, float]:
+    """Подобное (similarity) выравнивание points_xy к ref_xy: поворот + сдвиг + масштаб в [scale_limits]."""
     src = np.asarray(points_xy, dtype=float)
     ref = np.asarray(ref_xy, dtype=float)
     src_center = src.mean(axis=0, keepdims=True)
@@ -97,22 +100,26 @@ def _similarity_align_points(
 
 
 def _trajectory_to_arrays(traj: Sequence[TrajectoryPoint]) -> tuple[np.ndarray, np.ndarray]:
+    """Развернуть последовательность TrajectoryPoint в (timestamps[N], xy[N, 2])."""
     ts = np.array([p.t for p in traj], dtype=float)
     xy = np.array([[p.x, p.y] for p in traj], dtype=float)
     return (ts, xy)
 
 
 def _center_points(points_xy: np.ndarray) -> np.ndarray:
+    """Сдвинуть точки так, чтобы их центр масс оказался в начале координат."""
     pts = np.asarray(points_xy, dtype=float)
     return pts - pts.mean(axis=0, keepdims=True)
 
 
 def _lap_rmse(points_xy: np.ndarray, ref_xy: np.ndarray) -> float:
+    """RMSE между двумя массивами точек одинаковой формы (евклидово расстояние)."""
     diff = np.asarray(points_xy, dtype=float) - np.asarray(ref_xy, dtype=float)
     return float(np.sqrt(np.mean(np.sum(diff * diff, axis=1))))
 
 
 def _anchor_scores_from_normalized(norm_xy: np.ndarray, anchor: str) -> np.ndarray:
+    """Скор близости каждой точки (в нормализованных координатах [0,1]) к якорному углу/стороне."""
     pts = np.asarray(norm_xy, dtype=float)
     anchor_key = anchor.strip().lower()
     if anchor_key == 'bottom_left':
@@ -135,6 +142,7 @@ def _anchor_scores_from_normalized(norm_xy: np.ndarray, anchor: str) -> np.ndarr
 
 
 def _anchor_scores(points_xy: np.ndarray, anchor: str) -> np.ndarray:
+    """Скор близости к якорю в исходных координатах (предварительно нормализует bbox в [0,1])."""
     pts = np.asarray(points_xy, dtype=float)
     if pts.shape[0] == 0:
         return np.zeros(0, dtype=float)
@@ -145,6 +153,7 @@ def _anchor_scores(points_xy: np.ndarray, anchor: str) -> np.ndarray:
 
 
 def _resample_polyline_by_arclength(points_xy: np.ndarray, sample_count: int) -> np.ndarray:
+    """Равномерно (по длине дуги) пересэмплировать ломаную в sample_count точек."""
     pts = np.asarray(points_xy, dtype=float)
     if pts.shape[0] == 0:
         return np.zeros((sample_count, 2), dtype=float)
@@ -169,6 +178,7 @@ def _resample_polyline_by_arclength(points_xy: np.ndarray, sample_count: int) ->
 
 
 def _resample_closed_polyline_by_arclength(points_xy: np.ndarray, sample_count: int) -> np.ndarray:
+    """То же, что _resample_polyline_by_arclength, но для замкнутого контура (зацикливает первую/последнюю точку)."""
     pts = np.asarray(points_xy, dtype=float)
     if pts.shape[0] == 0:
         return np.zeros((sample_count, 2), dtype=float)
@@ -200,6 +210,7 @@ def _align_lap_to_template(
     allow_scale: bool,
     phase_search_fraction: float,
 ) -> tuple[int, np.ndarray, float, float]:
+    """Подобрать сдвиг фазы и аффинное выравнивание круга к шаблону, минимизируя RMSE."""
     sample_count = int(points_xy.shape[0])
     best_shift = 0
     best_rmse = float('inf')
@@ -229,6 +240,7 @@ def _align_lap_to_template(
 
 
 def _robust_keep_mask(rmses: Sequence[float], min_keep: int=2, sigma: float=2.5) -> np.ndarray:
+    """Робастная маска оставленных кругов по робастному z-score (через MAD); гарантирует ≥ min_keep."""
     values = np.asarray(rmses, dtype=float)
     if values.size <= min_keep or sigma <= 0.0:
         return np.ones(values.shape[0], dtype=bool)
@@ -247,6 +259,7 @@ def _robust_keep_mask(rmses: Sequence[float], min_keep: int=2, sigma: float=2.5)
 
 
 def _choose_loop_anchor(loop_xy: np.ndarray, anchor: str) -> int:
+    """Индекс точки замкнутого контура, ближайшей к якорю (например, 'bottom_left')."""
     scores = _anchor_scores(loop_xy, anchor)
     if scores.size == 0:
         return 0
@@ -260,6 +273,7 @@ def _extract_lap_segment(
     t1: float,
     samples_per_lap: int,
 ) -> np.ndarray:
+    """Вырезать круг из траектории по [t0, t1] и пересэмплировать в samples_per_lap точек по дуге."""
     mask = (ts >= t0) & (ts <= t1)
     lap_xy = xy[mask]
     x0 = float(np.interp(t0, ts, xy[:, 0]))
@@ -278,6 +292,7 @@ def _search_anchor_boundaries(
     search_radius_fraction: float,
     min_gap_fraction: float,
 ) -> List[tuple[int, float]]:
+    """Подобрать моменты времени-границы кругов, перебирая фазовый сдвиг и ища точки, ближайшие к якорю."""
     if period <= 0.0:
         return []
     search_radius = max(period * 0.1, period * search_radius_fraction)
@@ -286,6 +301,7 @@ def _search_anchor_boundaries(
     offset_steps = 64
 
     def collect_for_targets(targets: np.ndarray) -> tuple[List[tuple[int, float]], List[float]]:
+        """Для каждого целевого момента найти лучшую точку-кандидат на границу круга, отфильтровать близкие."""
         candidates: List[tuple[int, float, float]] = []
         for target_t in targets:
             search_mask = (ts >= target_t - search_radius) & (ts <= target_t + search_radius)
@@ -347,6 +363,7 @@ def _extract_anchor_laps(
     anchor: str,
     search_radius_fraction: float,
 ) -> tuple[List[tuple[int, float, float, np.ndarray]], np.ndarray]:
+    """Извлечь круги по якорным границам: вернуть [(idx, t0, t1, xy_resampled)] и моменты разбиения."""
     ts, xy = _trajectory_to_arrays(traj)
     total_time = float(ts[-1] - ts[0])
     if total_time < period * min_fraction:
@@ -382,6 +399,7 @@ def _extract_periodic_laps(
     samples_per_lap: int,
     min_fraction: float,
 ) -> tuple[List[tuple[int, float, float, np.ndarray]], np.ndarray]:
+    """Fallback-нарезка кругов фиксированной длительности period (без якоря)."""
     ts, xy = _trajectory_to_arrays(traj)
     total_time = float(ts[-1] - ts[0])
     if total_time < period * min_fraction:
@@ -404,6 +422,7 @@ def _extract_periodic_laps(
 
 
 def _fourier_smooth_closed_path(points_xy: np.ndarray, harmonics: int) -> np.ndarray:
+    """Сгладить замкнутый контур, оставив только первые `harmonics` гармоник комплексного FFT."""
     loop_xy = np.asarray(points_xy, dtype=float)
     if harmonics <= 0 or loop_xy.shape[0] == 0:
         return loop_xy
@@ -418,6 +437,7 @@ def _fourier_smooth_closed_path(points_xy: np.ndarray, harmonics: int) -> np.nda
 
 
 def _sample_closed_catmull_rom(control_xy: np.ndarray, sample_count: int) -> np.ndarray:
+    """Выбрать sample_count точек на замкнутом сплайне Catmull-Rom по control_xy."""
     controls = np.asarray(control_xy, dtype=float)
     count = controls.shape[0]
     if count == 0:
@@ -450,6 +470,7 @@ def _fit_closed_spline(
     anchor: str,
     harmonics: int,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Подогнать замкнутый сплайн через FFT-сглаживание + Catmull-Rom; вернуть (control_xy, spline_xy)."""
     rep = np.asarray(representative_xy, dtype=float)
     rep = _center_points(rep)
     rep = _fourier_smooth_closed_path(rep, harmonics=harmonics)
@@ -474,6 +495,7 @@ def _build_canonical_loop(
     statistic: str,
     control_count: int,
 ) -> tuple[np.ndarray, np.ndarray]:
+    """Усреднить выровненные круги (mean/median) и подогнать замкнутый сплайн как канонический контур."""
     if statistic == 'mean':
         representative_xy = aligned_laps.mean(axis=0)
     else:
@@ -495,6 +517,7 @@ def _project_points_to_closed_path(
     path_xy: np.ndarray,
     search_fraction: float,
 ) -> tuple[np.ndarray, float]:
+    """Спроецировать каждую точку на ближайшую вершину замкнутого пути (с локальным окном поиска)."""
     pts = np.asarray(points_xy, dtype=float)
     path = np.asarray(path_xy, dtype=float)
     if pts.shape[0] == 0 or path.shape[0] == 0:
@@ -516,6 +539,7 @@ def _project_points_to_closed_path(
 
 
 def _loop_xy_to_trajectory(loop_xy: np.ndarray, period: float) -> List[TrajectoryPoint]:
+    """Превратить XY-замкнутый контур в TrajectoryPoint-список (yaw — направление касательной)."""
     deriv = np.roll(loop_xy, -1, axis=0) - loop_xy
     yaw = np.arctan2(deriv[:, 1], deriv[:, 0])
     out: List[TrajectoryPoint] = []
@@ -529,6 +553,7 @@ def _canonicalize_periodic_trajectory(
     traj: Sequence[TrajectoryPoint],
     cfg: Dict,
 ) -> tuple[List[TrajectoryPoint], Optional[LoopAveragingDebug]]:
+    """Каноникализировать периодическую траекторию: нарезать на круги, выровнять, усреднить, аппроксимировать сплайном."""
     period = float(cfg.get('loop_period_sec', 0.0) or 0.0)
     if period <= 0.0 or len(traj) < 10:
         return (list(traj), None)
@@ -662,14 +687,17 @@ def _canonicalize_periodic_trajectory(
 
 
 class VisionObservationSmoother:
+    """EMA-сглаживание угла ленты и положения её основания между кадрами (стабилизация шумного детектора)."""
 
     def __init__(self, window_frames: int=20) -> None:
+        """Создать сглаживатель; window_frames задаёт эффективное окно EMA (alpha = 2/(N+1))."""
         self.window_frames = max(1, int(window_frames))
         self.alpha = 2.0 / (self.window_frames + 1.0)
         self._angle_vec: Optional[np.ndarray] = None
         self._bottom_x: Optional[float] = None
 
     def _update_angle(self, angle_rad: float) -> float:
+        """EMA-сглаживание угла на единичной окружности (через cos/sin, чтобы не было разрыва на ±π)."""
         if not np.isfinite(angle_rad):
             return float('nan')
         vec = np.array([np.cos(angle_rad), np.sin(angle_rad)], dtype=float)
@@ -683,6 +711,7 @@ class VisionObservationSmoother:
         return float(np.arctan2(self._angle_vec[1], self._angle_vec[0]))
 
     def _update_bottom_x(self, bottom_x: float) -> float:
+        """EMA-сглаживание X-координаты основания ленты в нижней части кадра."""
         if not np.isfinite(bottom_x):
             return float('nan')
         if self._bottom_x is None:
@@ -692,6 +721,7 @@ class VisionObservationSmoother:
         return float(self._bottom_x)
 
     def update(self, obs: TapeObservation) -> TapeObservation:
+        """Применить EMA к angle_rad и bottom_x наблюдения; маски и центральная линия проходят без изменений."""
         return TapeObservation(
             centerline_px=obs.centerline_px,
             angle_rad=self._update_angle(obs.angle_rad),
@@ -708,6 +738,7 @@ def estimate_trajectory_with_details(
     cfg: Dict,
     save_debug_video: Optional[str]=None,
 ) -> TrajectoryEstimateResult:
+    """Главный пайплайн: видео + IMU → 2D-траектория робота с опциональным сглаживанием по периоду круга."""
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise RuntimeError(f'Cannot open video: {video_path}')
@@ -720,6 +751,7 @@ def estimate_trajectory_with_details(
     k_yaw = float(cfg.get('vision_yaw_gain', 0.08))
     yaw_max = float(cfg.get('vision_yaw_max_correction', 0.12))
     k_lat = float(cfg.get('vision_lateral_gain', 0.002))
+    k_lat_yaw = float(cfg.get('vision_lat_yaw_gain', 0.0001))
     vision_smoothing_frames = int(cfg.get('vision_smoothing_frames', 20))
     use_imu_translation = bool(cfg.get('imu_use_translation', False))
     vision_smoother = VisionObservationSmoother(window_frames=vision_smoothing_frames)
@@ -772,6 +804,7 @@ def estimate_trajectory_with_details(
             dy_body = -k_lat * err_px * dt_frame
             x += float(-dy_body * np.sin(yaw))
             y += float(dy_body * np.cos(yaw))
+            yaw -= k_lat_yaw * err_px * dt_frame
         traj.append(TrajectoryPoint(t=t, x=x, y=y, yaw=yaw))
         if save_debug_video is not None:
             if writer is None:
@@ -820,6 +853,7 @@ def estimate_trajectory(
     cfg: Dict,
     save_debug_video: Optional[str]=None,
 ) -> List[TrajectoryPoint]:
+    """Обёртка над estimate_trajectory_with_details, возвращающая только итоговую траекторию."""
     return estimate_trajectory_with_details(
         video_path=video_path,
         imu_samples=imu_samples,

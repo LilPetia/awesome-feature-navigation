@@ -9,22 +9,27 @@ from .line_detection import COLOR_PRESETS, LineDetector, SUPPORTED_COLORS, resol
 COLOR_KEYS = {ord('1'): 'red', ord('2'): 'blue', ord('3'): 'green', ord('4'): 'yellow', ord('5'): 'white'}
 
 def _nothing(x: int) -> None:
+    """Заглушка-callback для cv2.createTrackbar."""
     return
 
 def _load_cfg(path: str) -> Dict:
+    """Загрузить YAML-конфиг или вернуть {} если файл отсутствует."""
     p = Path(path)
     if p.exists():
         return yaml.safe_load(p.read_text(encoding='utf-8')) or {}
     return {}
 
 def _save_cfg(path: str, cfg: Dict) -> None:
+    """Сохранить cfg в YAML-файл (порядок ключей сохраняется)."""
     Path(path).write_text(yaml.safe_dump(cfg, sort_keys=False), encoding='utf-8')
 
 def _preset_ranges(color: str) -> List[List[int]]:
+    """Получить дефолтные HSV-диапазоны для заданного цвета (как плоские 6-числовые списки)."""
     preset = COLOR_PRESETS[color]
     return [list(low) + list(high) for low, high in preset]
 
 def _set_trackbars(win: str, color_name: str, ranges: List[List[int]], auto_color: bool) -> None:
+    """Выставить положения всех трекбаров окна в соответствии с цветом и HSV-диапазонами."""
     ranges = list(ranges)
     if len(ranges) < 2:
         ranges.append([0, 0, 0, 0, 0, 0])
@@ -37,6 +42,7 @@ def _set_trackbars(win: str, color_name: str, ranges: List[List[int]], auto_colo
             cv2.setTrackbarPos(f'R{idx} {name}', win, int(value))
 
 def _read_trackbars(win: str) -> Dict:
+    """Прочитать состояние всех трекбаров и собрать cfg-словарь (target_color, auto, hsv_ranges)."""
     color_idx = cv2.getTrackbarPos('Color', win)
     color_name = SUPPORTED_COLORS[min(color_idx, len(SUPPORTED_COLORS) - 1)]
     auto_color = bool(cv2.getTrackbarPos('Auto', win))
@@ -49,6 +55,7 @@ def _read_trackbars(win: str) -> Dict:
     return {'target_color': color_name, 'auto_color_tune': auto_color, 'hsv_ranges': ranges}
 
 def main() -> None:
+    """Точка входа CLI `afn-tune`: интерактивный подбор HSV-порогов под видео в окне OpenCV."""
     ap = argparse.ArgumentParser(description='Interactive HSV tuner for tape detection')
     ap.add_argument('--video', required=True)
     ap.add_argument('--config', default='config.yaml')

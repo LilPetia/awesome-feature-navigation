@@ -9,12 +9,14 @@ from .plotting import save_loop_debug_csv, save_loop_debug_plot, save_trajectory
 from .trajectory import estimate_trajectory_with_details
 
 def _load_cfg(path: Optional[str]) -> Dict:
+    """Прочитать YAML-конфиг по пути; вернуть {} если path=None или файл пустой."""
     cfg: Dict = {}
     if path is not None:
         cfg = yaml.safe_load(Path(path).read_text(encoding='utf-8')) or {}
     return cfg
 
 def main() -> None:
+    """Точка входа CLI `afn-run`: видео + IMU → 2D-траектория, CSV/HTML-выгрузка."""
     ap = argparse.ArgumentParser(description='Red-tape navigation: video + IMU -> 2D trajectory')
     ap.add_argument('--video', required=True, help='Path to video (mp4)')
     ap.add_argument('--imu', default=None, help='Path to IMU CSV. If omitted, runs in demo mode.')

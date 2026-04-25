@@ -9,7 +9,7 @@ dependencies = [
   "opencv-python>=4.8",
   "matplotlib>=3.7",
   "plotly>=5.20",
-  #"gtsam>=4.2",
+  "gtsam>=4.3a0",
   "pyyaml>=6.0",
   "pandas>=2.0",
 ]

@@ -24,6 +24,7 @@ _PLOT_COLORS = (
 
 
 def save_trajectory_csv(traj: Sequence[TrajectoryPoint], path: str) -> None:
+    """Сохранить траекторию в CSV (колонки: t, x, y, yaw)."""
     with open(path, 'w', newline='', encoding='utf-8') as f:
         w = csv.writer(f)
         w.writerow(['t', 'x', 'y', 'yaw'])
@@ -36,6 +37,7 @@ def save_trajectory_plot(
     path: str,
     title: str='Estimated Trajectory (Interactive)',
 ) -> None:
+    """Сохранить интерактивный 2D-график траектории (Plotly HTML или статическая картинка)."""
     if not traj:
         print('Warning: Trajectory is empty, skipping plot.')
         return
@@ -100,6 +102,7 @@ def save_trajectory_plot(
 
 
 def save_loop_debug_csv(loop_debug: LoopAveragingDebug, path: str) -> None:
+    """Сохранить отладку петель (по каждому кругу: raw/aligned/projected XY, фаза, scale, RMSE) в CSV."""
     with open(path, 'w', newline='', encoding='utf-8') as f:
         w = csv.writer(f)
         w.writerow([
@@ -142,6 +145,7 @@ def save_loop_debug_csv(loop_debug: LoopAveragingDebug, path: str) -> None:
 
 
 def save_loop_debug_plot(loop_debug: LoopAveragingDebug, path: str) -> None:
+    """Построить интерактивный график отладки петель (raw / aligned / projected + усреднённый сплайн)."""
     if not loop_debug.laps:
         print('Warning: Loop debug is empty, skipping loop plot.')
         return

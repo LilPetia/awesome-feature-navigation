@@ -16,6 +16,7 @@ class TapeObservation:
     centerline_mask: np.ndarray
 
 def _fit_direction(points_xy: np.ndarray) -> float:
+    """Найти направление (angle, рад) ведущего собственного вектора облака точек через PCA."""
     if points_xy.shape[0] < 2:
         return float('nan')
     pts = points_xy.astype(np.float64)
@@ -30,12 +31,14 @@ def _fit_direction(points_xy: np.ndarray) -> float:
     return angle
 
 def _clip_hsv_triplet(values: Sequence[int]) -> np.ndarray:
+    """Обрезать HSV-тройку: H в [0, 180], S/V в [0, 255], тип uint8."""
     arr = np.asarray(values, dtype=int).reshape(3)
     arr[0] = int(np.clip(arr[0], 0, 180))
     arr[1:] = np.clip(arr[1:], 0, 255)
     return arr.astype(np.uint8)
 
 def _normalize_hsv_ranges(ranges: Iterable[Sequence[int]]) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """Привести список 6-числовых диапазонов в список пар (low_uint8[3], high_uint8[3])."""
     normalized: List[Tuple[np.ndarray, np.ndarray]] = []
     for item in ranges:
         values = np.asarray(item, dtype=int).flatten()
@@ -49,12 +52,14 @@ def _normalize_hsv_ranges(ranges: Iterable[Sequence[int]]) -> List[Tuple[np.ndar
     return normalized
 
 def resolve_target_color(cfg: dict) -> str:
+    """Получить целевой цвет ленты из cfg; вернуть 'red' если значение невалидно."""
     color = str(cfg.get('target_color', 'red')).strip().lower()
     if color not in SUPPORTED_COLORS:
         return 'red'
     return color
 
 def resolve_hsv_ranges(cfg: dict) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """Получить HSV-диапазоны из cfg (явные / legacy red1/red2 / preset по target_color)."""
     explicit = cfg.get('hsv_ranges')
     if explicit:
         normalized = _normalize_hsv_ranges(explicit)
@@ -75,13 +80,16 @@ def resolve_hsv_ranges(cfg: dict) -> List[Tuple[np.ndarray, np.ndarray]]:
     return _normalize_hsv_ranges([list(low) + list(high) for low, high in preset])
 
 class LineDetector:
+    """Детектор центральной линии цветной ленты на кадре (HSV-маска + дистанционное преобразование)."""
 
     def __init__(self, resize_width: int=640):
+        """Создать детектор; resize_width задаёт ширину уменьшенного кадра для ускорения."""
         self.resize_width = resize_width
         self.min_pixels = 10
         self.prev_centerline: Optional[np.ndarray] = None
 
     def _keep_largest_component(self, mask: np.ndarray) -> np.ndarray:
+        """Оставить в маске только самую крупную связную компоненту."""
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
         if num_labels > 1:
             areas = stats[1:, cv2.CC_STAT_AREA]
@@ -90,6 +98,7 @@ class LineDetector:
         return (mask > 0).astype('uint8') * 255
 
     def _calculate_centerline_dt(self, mask: np.ndarray, start_y: int, end_y: int) -> Tuple[np.ndarray, np.ndarray]:
+        """Найти центральную линию ленты по distance transform: для каждой строки взять argmax расстояния до края."""
         dist_map = cv2.distanceTransform(mask, cv2.DIST_L2, 5)
         roi_map = np.zeros_like(dist_map)
         roi_map[start_y:end_y, :] = dist_map[start_y:end_y, :]
@@ -109,6 +118,7 @@ class LineDetector:
         return (centerline_img, pts_array)
 
     def _smooth_centerline_points(self, points_xy: np.ndarray, smooth_window: int, width: int) -> np.ndarray:
+        """Сгладить X-координаты центральной линии скользящим средним по окну smooth_window."""
         if points_xy.shape[0] < 3:
             return points_xy
         window = max(1, int(smooth_window))
@@ -126,6 +136,7 @@ class LineDetector:
         return np.column_stack((smoothed_xs, ys)).astype(np.float32)
 
     def _render_centerline(self, mask_shape: Tuple[int, int], points_xy: np.ndarray) -> np.ndarray:
+        """Отрисовать ломаную центральной линии в маску формы mask_shape."""
         centerline_img = np.zeros(mask_shape, dtype=np.uint8)
         if points_xy.shape[0] == 0:
             return centerline_img
@@ -138,12 +149,14 @@ class LineDetector:
         return centerline_img
 
     def _build_mask(self, hsv_frame: np.ndarray, ranges: Sequence[Tuple[np.ndarray, np.ndarray]]) -> np.ndarray:
+        """Объединить HSV-маски по всем диапазонам ranges через bitwise OR."""
         mask = np.zeros(hsv_frame.shape[:2], dtype=np.uint8)
         for low, high in ranges:
             mask = cv2.bitwise_or(mask, cv2.inRange(hsv_frame, low, high))
         return mask
 
     def _auto_tune_ranges(self, hsv_frame: np.ndarray, ranges: Sequence[Tuple[np.ndarray, np.ndarray]], color: str, start_y: int, end_y: int) -> List[Tuple[np.ndarray, np.ndarray]]:
+        """Подстроить HSV-границы под текущий кадр по перцентилям ROI (адаптация к освещению)."""
         hsv_roi = hsv_frame[start_y:end_y, :, :]
         if hsv_roi.size == 0:
             return list(ranges)
@@ -182,6 +195,7 @@ class LineDetector:
         return tuned
 
     def process(self, frame_bgr: np.ndarray, cfg: dict) -> TapeObservation:
+        """Обработать кадр: HSV-маска ленты → центральная линия → угол наклона + положение основания."""
         src_h, src_w = frame_bgr.shape[:2]
         if self.resize_width > 0 and src_w != self.resize_width:
             width = int(self.resize_width)
