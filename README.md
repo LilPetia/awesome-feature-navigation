@@ -128,7 +128,7 @@ configs/right_camera.yaml
 - применение `T_cam_imu`;
 - Kalibr time shift;
 - gravity alignment;
-- параметры поиска цветной линии;
+- параметры поиска синей линии (`target_color: blue`);
 - режим `trajectory_mode: auto`.
 
 Обычно менять CLI-команду не нужно. Если меняется видео или IMU, достаточно подставить новые пути через `--video` и `--imu`.
@@ -198,7 +198,7 @@ uv run afn-run \
   --video data/Right_cam.mp4 \
   --imu data/imu_data.csv \
   --config configs/right_camera.yaml \
-  --color red \
+  --color blue \
   --auto-color \
   --out outputs/right_trajectory
 ```

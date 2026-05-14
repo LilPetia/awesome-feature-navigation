@@ -100,17 +100,17 @@ def _normalize_hsv_ranges(ranges: Iterable[Sequence[int]]) -> List[Tuple[np.ndar
         values = np.asarray(item, dtype=int).flatten()
         if values.size != 6:
             continue
-        low = _clip_hsv_triplet(values[:3])
-        high = _clip_hsv_triplet(values[3:])
-        low = np.minimum(low, high)
-        high = np.maximum(low, high)
+        raw_low = _clip_hsv_triplet(values[:3])
+        raw_high = _clip_hsv_triplet(values[3:])
+        low = np.minimum(raw_low, raw_high)
+        high = np.maximum(raw_low, raw_high)
         normalized.append((low, high))
     return normalized
 
 def resolve_target_color(cfg: dict) -> str:
-    color = str(cfg.get('target_color', 'red')).strip().lower()
+    color = str(cfg.get('target_color', 'blue')).strip().lower()
     if color not in SUPPORTED_COLORS:
-        return 'red'
+        return 'blue'
     return color
 
 def resolve_hsv_ranges(cfg: dict) -> List[Tuple[np.ndarray, np.ndarray]]:
@@ -119,17 +119,18 @@ def resolve_hsv_ranges(cfg: dict) -> List[Tuple[np.ndarray, np.ndarray]]:
         normalized = _normalize_hsv_ranges(explicit)
         if normalized:
             return normalized
-    legacy_ranges = []
-    for idx in (1, 2):
-        low = cfg.get(f'hsv_red{idx}_low')
-        high = cfg.get(f'hsv_red{idx}_high')
-        if low is not None and high is not None:
-            legacy_ranges.append(list(low) + list(high))
-    if legacy_ranges:
-        normalized = _normalize_hsv_ranges(legacy_ranges)
-        if normalized:
-            return normalized
     color = resolve_target_color(cfg)
+    if color == 'red':
+        legacy_ranges = []
+        for idx in (1, 2):
+            low = cfg.get(f'hsv_red{idx}_low')
+            high = cfg.get(f'hsv_red{idx}_high')
+            if low is not None and high is not None:
+                legacy_ranges.append(list(low) + list(high))
+        if legacy_ranges:
+            normalized = _normalize_hsv_ranges(legacy_ranges)
+            if normalized:
+                return normalized
     preset = COLOR_PRESETS[color]
     return _normalize_hsv_ranges([list(low) + list(high) for low, high in preset])
 

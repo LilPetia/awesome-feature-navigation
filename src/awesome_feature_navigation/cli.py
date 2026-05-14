@@ -75,7 +75,7 @@ def _normalize_time_base(frame_timestamps, imu_samples, cfg: Dict):
     return (frame_timestamps, imu_samples, synced)
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description='Red-tape navigation: video + IMU -> 2D trajectory')
+    ap = argparse.ArgumentParser(description='Colored-line navigation: video + IMU -> 2D trajectory')
     ap.add_argument('--video', required=True, help='Path to video (mp4)')
     ap.add_argument('--imu', default=None, help='Path to IMU CSV. If omitted, runs in demo mode.')
     ap.add_argument('--mode', choices=('auto', 'tape_line', 'generic_vio'), default=None, help='Trajectory estimator: legacy tape-following or generic visual-inertial odometry')

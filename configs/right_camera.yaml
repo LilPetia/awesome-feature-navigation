@@ -19,11 +19,10 @@ auto_video_config: true
 auto_loop_period: true
 loop_average: true
 
-target_color: red
+target_color: blue
 auto_color_tune: true
 hsv_ranges:
-  - [0, 92, 51, 10, 235, 255]
-  - [158, 120, 70, 151, 247, 255]
+  - [95, 100, 60, 130, 255, 255]
 
 vision_yaw_gain: 0.08
 vision_yaw_max_correction: 0.12
