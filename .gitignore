@@ -205,3 +205,13 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Project outputs
+outputs/*
+!outputs/.gitkeep
+trajectory*.csv
+trajectory*.html
+*_trajectory.csv
+*_trajectory.html
+*_debug.mp4
+data/*.mp4

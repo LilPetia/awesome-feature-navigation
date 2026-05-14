@@ -1,0 +1,31 @@
+[project]
+name = "awesome-feature-navigation"
+version = "0.1.0"
+description = "Lightweight right-camera video + IMU trajectory estimation"
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+dependencies = [
+  "numpy<2",
+  "opencv-python>=4.8",
+  "pandas>=2.0",
+  "plotly>=5.20",
+  "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+gtsam = [
+  "gtsam>=4.2",
+]
+
+[project.scripts]
+afn-run = "awesome_feature_navigation.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.uv]
+package = true

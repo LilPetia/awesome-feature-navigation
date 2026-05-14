@@ -1,0 +1,34 @@
+trajectory_mode: auto
+
+frame_timestamps: ../data/timestamps2.csv
+frame_timestamp_time_scale: 1.0e-9
+sync_time_base: auto
+
+imu_calibration: ../data/imu-imu_calibration.yaml
+camchain_calibration: ../data/camchain-imucam-imu_calibration.yaml
+imu_time_scale: 1.0e-9
+imu_gyro_scale: 0.017453292519943295
+imu_apply_camchain_rotation: true
+imu_apply_camchain_timeshift: true
+imu_align_gravity: true
+imu_yaw_axis: z
+imu_yaw_only: true
+imu_yaw_bias_window_sec: 1.0
+
+auto_video_config: true
+auto_loop_period: true
+loop_average: true
+
+target_color: red
+auto_color_tune: true
+hsv_ranges:
+  - [0, 92, 51, 10, 235, 255]
+  - [158, 120, 70, 151, 247, 255]
+
+vision_yaw_gain: 0.08
+vision_yaw_max_correction: 0.12
+vision_lateral_gain: 0.002
+vision_smoothing_frames: 20
+centerline_smooth_window: 11
+forward_speed_mps: 0.25
+max_frames: 0
