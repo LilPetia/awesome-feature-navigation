@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, cast
 
 import cv2
 import numpy as np
 
 from .imu_io import slice_imu
-from .imu_preintegration import IMUSample, IMUPreintegrationWrapper, build_default_params
+from .imu_preintegration import IMUPreintegrationWrapper, IMUSample, build_default_params
 from .line_detection import LineDetector, TapeObservation
 
 
@@ -52,10 +52,25 @@ class TrajectoryEstimateResult:
     mode: str = 'tape_line'
     relative_scale: bool = False
     estimated_loop_period_sec: Optional[float] = None
+    line_valid_ratio: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class TapeFrameObservation:
+    t: float
+    dt: float
+    obs: TapeObservation
+    confidence: float
+    delta_yaw: float
+    delta_p: np.ndarray
 
 
 def _clamp(x: float, lo: float, hi: float) -> float:
     return float(max(lo, min(hi, x)))
+
+
+def _mp4v_fourcc() -> int:
+    return int(cast(Any, cv2).VideoWriter_fourcc(*'mp4v'))
 
 
 def _cfg_float(cfg: Dict, keys: Sequence[str], default: float) -> float:
@@ -68,7 +83,7 @@ def _cfg_float(cfg: Dict, keys: Sequence[str], default: float) -> float:
     return float(default)
 
 
-def _build_imu_preintegration_params(cfg: Dict):
+def _build_imu_preintegration_params(cfg: Dict) -> object | None:
     return build_default_params(
         gravity_mps2=_cfg_float(cfg, ['imu_gravity_mps2', 'gravity_mps2'], 9.81),
         accel_noise_sigma=_cfg_float(
@@ -607,7 +622,7 @@ def _build_representative_lap_loop(
     reference_period: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     best_candidate: Optional[tuple[float, np.ndarray, np.ndarray]] = None
-    for (lap_index, t0, t1, _), aligned_xy, alignment_rmse, keep in zip(laps, aligned_laps, alignment_rmses, keep_mask):
+    for (_lap_index, t0, t1, _), aligned_xy, alignment_rmse, keep in zip(laps, aligned_laps, alignment_rmses, keep_mask):
         if not keep:
             continue
         loop_body = _center_points(aligned_xy)
@@ -778,7 +793,7 @@ def _canonicalize_periodic_trajectory(
                         laps=laps,
                         aligned_laps=final_aligned_laps,
                         alignment_rmses=final_rmses,
-                        keep_mask=keep_mask,
+                        keep_mask=[bool(keep) for keep in keep_mask],
                         harmonics=harmonics,
                         anchor=anchor,
                         control_count=control_count,
@@ -910,6 +925,225 @@ class VisionObservationSmoother:
         )
 
 
+def _line_observation_confidence(obs: TapeObservation, cfg: Dict) -> float:
+    points = np.asarray(obs.centerline_px, dtype=float)
+    h, w = obs.shape_hw
+    if points.shape[0] < int(cfg.get('line_confidence_min_points', 8) or 8):
+        return 0.0
+    top_cut = h // 2
+    bot_cut = h // 10
+    roi_end = max(top_cut + 1, h - bot_cut)
+    roi_h = max(1, roi_end - top_cut)
+    y_span = float(np.clip((points[:, 1].max() - points[:, 1].min()) / roi_h, 0.0, 1.0))
+    point_ratio = float(np.clip(points.shape[0] / roi_h, 0.0, 1.0))
+    bottom_y = top_cut + 0.72 * roi_h
+    bottom_hit = 1.0 if bool(np.any(points[:, 1] >= bottom_y)) else 0.0
+    roi_mask = obs.mask[top_cut:roi_end, :]
+    area_ratio = float(np.count_nonzero(roi_mask)) / float(max(1, roi_h * w))
+    min_area = float(cfg.get('line_confidence_min_area_ratio', 0.0005) or 0.0005)
+    max_area = float(cfg.get('line_confidence_max_area_ratio', 0.35) or 0.35)
+    if area_ratio < min_area or area_ratio > max_area:
+        area_score = 0.0
+    elif area_ratio > 0.22:
+        area_score = 0.6
+    else:
+        area_score = 1.0
+    angle_score = 1.0 if np.isfinite(obs.angle_rad) else 0.0
+    score = area_score * (
+        0.4 * point_ratio
+        + 0.25 * y_span
+        + 0.25 * bottom_hit
+        + 0.1 * angle_score
+    )
+    return float(np.clip(score, 0.0, 1.0))
+
+
+def _centered_weighted_average(
+    values: np.ndarray,
+    weights: np.ndarray,
+    window_frames: int,
+) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    weights = np.asarray(weights, dtype=float)
+    n = values.shape[0]
+    if n == 0:
+        return values.copy()
+    window = max(1, int(window_frames))
+    if window <= 1:
+        return values.copy()
+    radius = window // 2
+    out = np.full(n, np.nan, dtype=float)
+    for idx in range(n):
+        lo = max(0, idx - radius)
+        hi = min(n, idx + radius + 1)
+        local_values = values[lo:hi]
+        local_weights = weights[lo:hi]
+        valid = np.isfinite(local_values) & np.isfinite(local_weights) & (local_weights > 0.0)
+        if not bool(np.any(valid)):
+            continue
+        wsum = float(np.sum(local_weights[valid]))
+        if wsum <= 1e-12:
+            continue
+        out[idx] = float(np.sum(local_values[valid] * local_weights[valid]) / wsum)
+    return out
+
+
+def _centered_weighted_angle_average(
+    angles: np.ndarray,
+    weights: np.ndarray,
+    window_frames: int,
+) -> np.ndarray:
+    angles = np.asarray(angles, dtype=float)
+    sin_avg = _centered_weighted_average(np.sin(angles), weights, window_frames)
+    cos_avg = _centered_weighted_average(np.cos(angles), weights, window_frames)
+    out = np.full(angles.shape[0], np.nan, dtype=float)
+    valid = np.isfinite(sin_avg) & np.isfinite(cos_avg)
+    norms = np.sqrt(sin_avg[valid] * sin_avg[valid] + cos_avg[valid] * cos_avg[valid])
+    valid_idx = np.flatnonzero(valid)
+    keep = norms > 1e-9
+    out[valid_idx[keep]] = np.arctan2(sin_avg[valid][keep], cos_avg[valid][keep])
+    return out
+
+
+def _mid_angle(a: float, b: float) -> float:
+    return _blend_angles(a, b, 0.5)
+
+
+def _build_offline_tape_line_trajectory(
+    records: Sequence[TapeFrameObservation],
+    cfg: Dict,
+) -> tuple[List[TrajectoryPoint], float]:
+    if not records:
+        return ([], 0.0)
+    times = np.asarray([record.t for record in records], dtype=float)
+    dts = np.asarray([record.dt for record in records], dtype=float)
+    delta_yaws = np.asarray([record.delta_yaw for record in records], dtype=float)
+    angles = np.asarray([record.obs.angle_rad for record in records], dtype=float)
+    bottom_xs = np.asarray([record.obs.bottom_x for record in records], dtype=float)
+    widths = np.asarray([record.obs.shape_hw[1] for record in records], dtype=float)
+    confidences = np.asarray([record.confidence for record in records], dtype=float)
+    min_confidence = float(cfg.get('offline_line_min_confidence', 0.15) or 0.15)
+    weights = np.where(confidences >= min_confidence, confidences, 0.0)
+    valid_ratio = float(np.mean(weights > 0.0)) if weights.size else 0.0
+
+    smoothing_frames = int(
+        cfg.get(
+            'offline_line_smoothing_frames',
+            cfg.get('vision_smoothing_frames', 20),
+        ) or 20
+    )
+    if bool(cfg.get('offline_tape_smoothing', True)):
+        smooth_angles = _centered_weighted_angle_average(angles, weights, smoothing_frames)
+        smooth_bottom_xs = _centered_weighted_average(bottom_xs, weights, smoothing_frames)
+    else:
+        smooth_angles = angles.copy()
+        smooth_bottom_xs = bottom_xs.copy()
+
+    v_forward = float(cfg.get('forward_speed_mps', 0.25))
+    k_yaw = float(cfg.get('vision_yaw_gain', 0.08))
+    k_yaw_nonlinear = float(cfg.get('vision_yaw_nonlinear_gain', 0.0) or 0.0)
+    yaw_max = float(cfg.get('vision_yaw_max_correction', 0.12))
+    k_lat = float(cfg.get('vision_lateral_gain', 0.002))
+    use_imu_translation = bool(cfg.get('imu_use_translation', False))
+
+    x, y, yaw = (0.0, 0.0, 0.0)
+    traj: List[TrajectoryPoint] = [TrajectoryPoint(t=float(times[0]), x=x, y=y, yaw=yaw)]
+    for idx in range(1, len(records)):
+        dt_frame = max(1e-6, float(dts[idx]))
+        dyaw_imu = float(delta_yaws[idx]) if np.isfinite(delta_yaws[idx]) else 0.0
+        yaw_pred = yaw + dyaw_imu
+        conf = float(weights[idx])
+        conf_scale = float(np.clip(conf, 0.0, 1.0))
+        visual_corr = 0.0
+        if np.isfinite(smooth_angles[idx]) and conf_scale > 0.0:
+            yaw_error = float(smooth_angles[idx])
+            yaw_cmd = k_yaw * yaw_error
+            if k_yaw_nonlinear != 0.0:
+                yaw_cmd += k_yaw_nonlinear * yaw_error * abs(yaw_error)
+            visual_corr = _clamp(yaw_cmd, -yaw_max, yaw_max) * dt_frame * conf_scale
+        yaw_next = yaw_pred + visual_corr
+        yaw_move = _mid_angle(yaw, yaw_next)
+
+        used_imu_translation = False
+        if use_imu_translation:
+            delta_p = np.asarray(records[idx].delta_p[:2], dtype=float)
+            if np.all(np.isfinite(delta_p)):
+                c, s = (np.cos(yaw_move), np.sin(yaw_move))
+                R = np.array([[c, -s], [s, c]], dtype=float)
+                dp_world = R @ delta_p
+                x += float(dp_world[0])
+                y += float(dp_world[1])
+                used_imu_translation = True
+        if not used_imu_translation:
+            dist = v_forward * dt_frame
+            x += float(dist * np.cos(yaw_move))
+            y += float(dist * np.sin(yaw_move))
+
+        if np.isfinite(smooth_bottom_xs[idx]) and conf_scale > 0.0:
+            err_px = float(smooth_bottom_xs[idx] - widths[idx] * 0.5)
+            dy_body = -k_lat * err_px * dt_frame * conf_scale
+            x += float(-dy_body * np.sin(yaw_next))
+            y += float(dy_body * np.cos(yaw_next))
+
+        yaw = yaw_next
+        traj.append(TrajectoryPoint(t=float(times[idx]), x=x, y=y, yaw=yaw))
+    return (traj, valid_ratio)
+
+
+def _write_tape_line_debug_video(
+    video_path: str,
+    debug_path: str,
+    fps: float,
+    records: Sequence[TapeFrameObservation],
+    traj: Sequence[TrajectoryPoint],
+) -> None:
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        return
+    writer = None
+    frame_i = 0
+    try:
+        while frame_i < len(records):
+            ok, frame = cap.read()
+            if not ok:
+                break
+            record = records[frame_i]
+            point = traj[min(frame_i, len(traj) - 1)]
+            h, w = record.obs.shape_hw
+            if writer is None:
+                fourcc = _mp4v_fourcc()
+                writer = cv2.VideoWriter(debug_path, fourcc, fps, (frame.shape[1], frame.shape[0]))
+            dbg = frame.copy()
+            mask = cv2.resize(
+                record.obs.mask,
+                (0, 0),
+                fx=frame.shape[1] / w,
+                fy=frame.shape[0] / h,
+                interpolation=cv2.INTER_NEAREST,
+            )
+            mask_col = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
+            mask_col[:, :, 1:] = 0
+            dbg = cv2.addWeighted(dbg, 1.0, mask_col, 0.35, 0)
+            if np.isfinite(record.obs.bottom_x):
+                bx = int(round(record.obs.bottom_x * frame.shape[1] / w))
+                cv2.line(dbg, (bx, frame.shape[0] - 1), (bx, int(frame.shape[0] * 0.8)), (0, 255, 255), 2)
+            cv2.putText(
+                dbg,
+                f't={point.t:.2f}s x={point.x:.2f} y={point.y:.2f} yaw={point.yaw:.2f} conf={record.confidence:.2f}',
+                (20, 30),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (255, 255, 255),
+                2,
+            )
+            writer.write(dbg)
+            frame_i += 1
+    finally:
+        cap.release()
+        if writer is not None:
+            writer.release()
+
+
 def _resize_frame_keep_aspect(frame_bgr: np.ndarray, resize_width: int) -> np.ndarray:
     src_h, src_w = frame_bgr.shape[:2]
     if resize_width <= 0 or src_w <= resize_width:
@@ -947,12 +1181,18 @@ def _track_features_forward_backward(
             np.zeros((0, 2), dtype=np.float32),
             np.zeros((0, 2), dtype=np.float32),
         )
-    lk_kwargs = dict(
-        winSize=(int(cfg.get('vio_win_size', 21) or 21), int(cfg.get('vio_win_size', 21) or 21)),
-        maxLevel=int(cfg.get('vio_max_pyramid_level', 3) or 3),
-        criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01),
+    win_size = (int(cfg.get('vio_win_size', 21) or 21), int(cfg.get('vio_win_size', 21) or 21))
+    max_level = int(cfg.get('vio_max_pyramid_level', 3) or 3)
+    criteria = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
+    next_pts, status, _ = cv2.calcOpticalFlowPyrLK(
+        prev_gray,
+        gray,
+        prev_pts,
+        np.empty_like(prev_pts),
+        winSize=win_size,
+        maxLevel=max_level,
+        criteria=criteria,
     )
-    next_pts, status, _ = cv2.calcOpticalFlowPyrLK(prev_gray, gray, prev_pts, None, **lk_kwargs)
     if next_pts is None or status is None:
         return (
             np.zeros((0, 2), dtype=np.float32),
@@ -969,8 +1209,10 @@ def _track_features_forward_backward(
         gray,
         prev_gray,
         good_next.reshape(-1, 1, 2),
-        None,
-        **lk_kwargs,
+        np.empty_like(good_next.reshape(-1, 1, 2)),
+        winSize=win_size,
+        maxLevel=max_level,
+        criteria=criteria,
     )
     if back_pts is None or back_status is None:
         return (
@@ -1140,6 +1382,17 @@ def _generic_vio_result_is_usable(result: TrajectoryEstimateResult, cfg: Dict) -
     return bool(np.isfinite(length_span_ratio) and length_span_ratio <= max_ratio)
 
 
+def _tape_line_result_is_usable(result: TrajectoryEstimateResult, cfg: Dict) -> bool:
+    if not result.raw_traj or len(result.raw_traj) < 8:
+        return False
+    min_valid_ratio = float(cfg.get('auto_tape_min_valid_ratio', 0.2) or 0.2)
+    if result.line_valid_ratio is None or result.line_valid_ratio < min_valid_ratio:
+        return False
+    xy = np.array([[p.x, p.y] for p in result.raw_traj], dtype=float)
+    span = float(np.max(xy.max(axis=0) - xy.min(axis=0)))
+    return bool(np.isfinite(span) and span > 1e-9)
+
+
 def _estimate_generic_vio_trajectory_with_details(
     video_path: str,
     imu_samples: Optional[Sequence[IMUSample]],
@@ -1168,7 +1421,7 @@ def _estimate_generic_vio_trajectory_with_details(
     last_t: Optional[float] = None
     writer = None
     if save_debug_video is not None:
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        fourcc = _mp4v_fourcc()
     frame_i = 0
     while True:
         ok, frame = cap.read()
@@ -1196,7 +1449,7 @@ def _estimate_generic_vio_trajectory_with_details(
         H_norm, inlier_prev, inlier_next, inlier_ratio = _estimate_normalized_similarity_transform(
             tracked_prev,
             tracked_next,
-            shape_hw=gray.shape[:2],
+            shape_hw=(int(gray.shape[0]), int(gray.shape[1])),
             cfg=cfg,
         )
         dyaw_imu = float('nan')
@@ -1289,26 +1542,14 @@ def _estimate_tape_line_trajectory_with_details(
     max_frames = int(cfg.get('max_frames', 0) or 0)
     detector = LineDetector(resize_width=int(cfg.get('resize_width', 640)))
     pim = IMUPreintegrationWrapper(params=_build_imu_preintegration_params(cfg))
-    x, y, yaw = (0.0, 0.0, 0.0)
-    v_forward = float(cfg.get('forward_speed_mps', 0.25))
-    k_yaw = float(cfg.get('vision_yaw_gain', 0.08))
-    k_yaw_nonlinear = float(cfg.get('vision_yaw_nonlinear_gain', 0.0) or 0.0)
-    yaw_max = float(cfg.get('vision_yaw_max_correction', 0.12))
-    k_lat = float(cfg.get('vision_lateral_gain', 0.002))
-    vision_smoothing_frames = int(cfg.get('vision_smoothing_frames', 20))
-    use_imu_translation = bool(cfg.get('imu_use_translation', False))
     auto_loop_enabled = bool(cfg.get('auto_loop_period', True))
     descriptor_stride = max(1, int(cfg.get('auto_loop_descriptor_stride', 5) or 5))
     descriptor_resize_width = int(cfg.get('auto_loop_resize_width', 320) or 320)
-    vision_smoother = VisionObservationSmoother(window_frames=vision_smoothing_frames)
     imu_idx = 0
     last_t: Optional[float] = None
-    traj: List[TrajectoryPoint] = []
+    records: List[TapeFrameObservation] = []
     frame_descriptors: List[np.ndarray] = []
     frame_descriptor_times: List[float] = []
-    writer = None
-    if save_debug_video is not None:
-        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     frame_i = 0
     while True:
         ok, frame = cap.read()
@@ -1323,80 +1564,45 @@ def _estimate_tape_line_trajectory_with_details(
             descriptor_gray = cv2.cvtColor(descriptor_frame, cv2.COLOR_BGR2GRAY)
             frame_descriptors.append(_make_frame_descriptor(descriptor_gray))
             frame_descriptor_times.append(t)
+        obs = detector.process(frame, cfg)
+        confidence = _line_observation_confidence(obs, cfg)
         if last_t is None:
             last_t = t
-            obs = vision_smoother.update(detector.process(frame, cfg))
-            traj.append(TrajectoryPoint(t=t, x=x, y=y, yaw=yaw))
+            records.append(
+                TapeFrameObservation(
+                    t=t,
+                    dt=0.0,
+                    obs=obs,
+                    confidence=confidence,
+                    delta_yaw=0.0,
+                    delta_p=np.zeros(3, dtype=float),
+                )
+            )
             continue
         dt_frame = max(1e-6, float(t - last_t))
-        obs = vision_smoother.update(detector.process(frame, cfg))
-        used_imu_translation = False
+        delta_yaw = 0.0
+        delta_p = np.zeros(3, dtype=float)
         if imu_samples is not None and len(imu_samples) >= 2:
             seg, imu_idx = slice_imu(imu_samples, last_t, t, start_idx=imu_idx)
             res = pim.preintegrate(seg, reset=True)
-            yaw += float(res.delta_yaw)
-            if use_imu_translation:
-                dp_body = res.delta_p[:2].astype(float)
-                c, s = (np.cos(yaw), np.sin(yaw))
-                R = np.array([[c, -s], [s, c]], dtype=float)
-                dp_world = R @ dp_body
-                x += float(dp_world[0])
-                y += float(dp_world[1])
-                used_imu_translation = True
-        if not used_imu_translation:
-            dist = v_forward * dt_frame
-            x += float(dist * np.cos(yaw))
-            y += float(dist * np.sin(yaw))
-        h, w = obs.shape_hw
-        cx_img = w * 0.5
-        if np.isfinite(obs.angle_rad):
-            yaw_error = float(obs.angle_rad)
-            yaw_cmd = k_yaw * yaw_error
-            if k_yaw_nonlinear != 0.0:
-                # Amplify larger heading errors without over-steering on straights.
-                yaw_cmd += k_yaw_nonlinear * yaw_error * abs(yaw_error)
-            corr = _clamp(yaw_cmd, -yaw_max, yaw_max) * dt_frame
-            yaw += corr
-        if np.isfinite(obs.bottom_x):
-            err_px = float(obs.bottom_x - cx_img)
-            dy_body = -k_lat * err_px * dt_frame
-            x += float(-dy_body * np.sin(yaw))
-            y += float(dy_body * np.cos(yaw))
-        traj.append(TrajectoryPoint(t=t, x=x, y=y, yaw=yaw))
-        if save_debug_video is not None:
-            if writer is None:
-                writer = cv2.VideoWriter(save_debug_video, fourcc, fps, (frame.shape[1], frame.shape[0]))
-            dbg = frame.copy()
-            mask = cv2.resize(
-                obs.mask,
-                (0, 0),
-                fx=frame.shape[1] / w,
-                fy=frame.shape[0] / h,
-                interpolation=cv2.INTER_NEAREST,
+            delta_yaw = float(res.delta_yaw)
+            delta_p = np.asarray(res.delta_p, dtype=float).reshape(3)
+        records.append(
+            TapeFrameObservation(
+                t=t,
+                dt=dt_frame,
+                obs=obs,
+                confidence=confidence,
+                delta_yaw=delta_yaw,
+                delta_p=delta_p,
             )
-            mask_col = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-            mask_col[:, :, 1:] = 0
-            alpha = 0.35
-            dbg = cv2.addWeighted(dbg, 1.0, mask_col, alpha, 0)
-            if np.isfinite(obs.bottom_x):
-                bx = int(round(obs.bottom_x * frame.shape[1] / w))
-                cv2.line(dbg, (bx, frame.shape[0] - 1), (bx, int(frame.shape[0] * 0.8)), (0, 255, 255), 2)
-            cv2.putText(
-                dbg,
-                f't={t:.2f}s x={x:.2f} y={y:.2f} yaw={yaw:.2f}',
-                (20, 30),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (255, 255, 255),
-                2,
-            )
-            writer.write(dbg)
+        )
         last_t = t
     cap.release()
-    if writer is not None:
-        writer.release()
+    raw_traj, line_valid_ratio = _build_offline_tape_line_trajectory(records, cfg)
+    if save_debug_video is not None and records:
+        _write_tape_line_debug_video(video_path, save_debug_video, fps, records, raw_traj)
 
-    raw_traj = list(traj)
     final_traj = raw_traj
     loop_debug = None
     estimated_period = None
@@ -1420,6 +1626,7 @@ def _estimate_tape_line_trajectory_with_details(
         mode='tape_line',
         relative_scale=False,
         estimated_loop_period_sec=reported_period,
+        line_valid_ratio=line_valid_ratio,
     )
 
 
@@ -1432,6 +1639,19 @@ def estimate_trajectory_with_details(
 ) -> TrajectoryEstimateResult:
     requested_mode = str(cfg.get('trajectory_mode', 'auto') or 'auto').strip().lower()
     if requested_mode == 'auto' and imu_samples is not None:
+        if bool(cfg.get('auto_prefer_tape_line', False)):
+            try:
+                tape_result = _estimate_tape_line_trajectory_with_details(
+                    video_path=video_path,
+                    imu_samples=imu_samples,
+                    cfg=cfg,
+                    save_debug_video=save_debug_video,
+                    frame_timestamps=frame_timestamps,
+                )
+                if _tape_line_result_is_usable(tape_result, cfg):
+                    return tape_result
+            except Exception:
+                pass
         try:
             generic_result = _estimate_generic_vio_trajectory_with_details(
                 video_path=video_path,

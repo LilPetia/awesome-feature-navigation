@@ -1,6 +1,6 @@
 # Awesome Feature Navigation
 
-![Python](https://img.shields.io/badge/python-3.11%2B-blue)
+![Python](https://img.shields.io/badge/python-3.10--3.14-blue)
 ![uv](https://img.shields.io/badge/package%20manager-uv-2f80ed)
 ![OpenCV](https://img.shields.io/badge/vision-OpenCV-green)
 ![IMU](https://img.shields.io/badge/sensors-camera%20%2B%20IMU-orange)
@@ -129,7 +129,8 @@ configs/right_camera.yaml
 - Kalibr time shift;
 - gravity alignment;
 - параметры поиска цветной линии;
-- режим `trajectory_mode: auto`.
+- режим `trajectory_mode: auto` с приоритетом line-based `tape_line`;
+- офлайн-сглаживание наблюдений линии перед интеграцией траектории.
 
 Обычно менять CLI-команду не нужно. Если меняется видео или IMU, достаточно подставить новые пути через `--video` и `--imu`.
 
@@ -141,9 +142,10 @@ configs/right_camera.yaml
 4. Синхронизирует видео и IMU по абсолютному времени.
 5. Применяет Kalibr `timeshift_cam_imu`.
 6. Поворачивает accel/gyro из IMU frame в camera frame через `T_cam_imu`.
-7. Строит траекторию в режиме `generic_vio`.
-8. Если `generic_vio` выглядит нестабильно, `auto` может перейти в `tape_line`.
-9. Сохраняет результат в CSV и HTML.
+7. В режиме `auto` сначала пробует line-based `tape_line`, если линия найдена достаточно надежно.
+8. Если `tape_line` непригоден, использует fallback `generic_vio`.
+9. Для `tape_line` офлайн сглаживает угол линии и боковое смещение по всей записи.
+10. Сохраняет результат в CSV и HTML.
 
 Подробное описание алгоритма:
 
@@ -167,7 +169,71 @@ src/awesome_feature_navigation/
 
 ## Разработка
 
-Проверить импорт и синтаксис:
+Установить dev-зависимости:
+
+```bash
+make sync-dev
+```
+
+Запустить все проверки как в CI:
+
+```bash
+make
+```
+
+То же самое явно:
+
+```bash
+make check
+```
+
+Отдельные проверки:
+
+```bash
+make lint     # ruff: стиль, импорты, часть потенциальных ошибок, аннотации
+make type     # mypy: статическая проверка типов
+make test     # pytest + coverage
+make compile  # compileall для src и tests
+make fix      # ruff auto-fix для безопасных исправлений
+```
+
+Что строго проверяют тесты:
+
+`tests/test_calibration.py`
+
+- `test_load_imu_calibration_config_maps_kalibr_fields` создает временный Kalibr IMU YAML с секцией `imu0` и проверяет, что поля шумов, random walk, update rate и time offset переносятся в внутренние ключи конфига без потери численных значений.
+- `test_load_camchain_calibration_config_extracts_transform_and_camera_metadata` создает временный camchain YAML и проверяет, что `T_cam_imu` читается как 4x4 transform, верхний левый 3x3 блок становится `imu_camera_rotation`, последний столбец становится `imu_camera_translation_m`, а `timeshift_cam_imu`, intrinsics, distortion, model, resolution и rostopic сохраняются в ожидаемых ключах.
+- `test_load_frame_timestamps_csv_sorts_by_frame_and_scales_time` создает CSV с кадрами в неправильном порядке и проверяет, что timestamps сначала сортируются по `frame_idx`, потом масштабируются через `time_scale`. Это защищает синхронизацию видео и IMU от ошибки порядка кадров.
+
+`tests/test_imu_io.py`
+
+- `test_shift_imu_samples_offsets_time_without_mutating_vectors` проверяет, что сдвиг времени меняет только `t`, но не меняет значения `accel` и `omega`.
+- `test_slice_imu_includes_neighbor_samples_for_integration_boundaries` проверяет, что при вырезании IMU-отрезка функция добавляет соседние сэмплы до и после интервала. Это важно для интегрирования между двумя кадрами: границы интервала не должны терять ближайшие измерения.
+- `test_slice_imu_returns_empty_segment_when_no_samples_are_available` фиксирует поведение на пустом IMU-входе: функция должна вернуть пустой сегмент и индекс `0`, а не падать.
+- `test_shift_imu_samples_preserves_numeric_arrays` проверяет, что после сдвига времени массивы accel/gyro остаются численно теми же через `np.testing.assert_allclose`.
+
+`tests/test_line_detection.py`
+
+- `test_resolve_target_color_defaults_to_blue_for_missing_or_invalid_values` проверяет дефолтный цвет: если `target_color` отсутствует или задан неверно, используется `blue`.
+- `test_resolve_hsv_ranges_uses_blue_preset_by_default` проверяет конкретный HSV-пресет для blue: `[95, 100, 60]..[130, 255, 255]`.
+- `test_legacy_red_hsv_ranges_apply_only_when_red_is_selected` проверяет, что старые ключи `hsv_red1_low/high` не перехватывают blue-режим. Это важно, потому что цвет линии в разных видео может быть разным, а legacy-настройки red не должны ломать текущий auto/blue сценарий.
+- `test_legacy_red_hsv_ranges_are_used_for_explicit_red` проверяет обратный случай: если явно выбран `target_color: red`, старые red HSV-диапазоны продолжают работать, причем low/high нормализуются в правильном порядке.
+
+`tests/test_offline_tape_line.py`
+
+- `test_line_observation_confidence_is_positive_for_clean_centerline` строит искусственную маску линии и centerline без видео и проверяет, что confidence у такого наблюдения больше `0.5`.
+- `test_offline_tape_line_smoothing_ignores_low_confidence_angle_outlier` строит последовательность из пяти искусственных наблюдений: четыре надежных с углом `0`, одно низкоуверенное с выбросом угла `1.5 rad`. Тест проверяет, что offline smoothing игнорирует этот выброс, valid ratio равен `0.8`, финальная траектория идет прямо по `x`, `y` остается около `0`, yaw остается около `0`.
+
+Что эти тесты не проверяют:
+
+- Они не требуют реальное видео `data/Right_cam.mp4`.
+- Они не проверяют качество траектории на конкретной записи с роботом.
+- Они не проверяют OpenCV optical flow end-to-end.
+- Они не проверяют физическую точность масштаба в метрах.
+
+Их задача сейчас - зафиксировать критичные контракты вокруг калибровок, времени, IMU-нарезки, выбора цвета линии и offline-сглаживания `tape_line`, чтобы эти части случайно не сломались при следующих правках.
+
+Проверить только импорт и синтаксис без остальных проверок:
 
 ```bash
 uv run python -m compileall src
@@ -180,25 +246,3 @@ uv run afn-run --help
 ```
 
 Локальные результаты сохраняй в `outputs/`. Эта папка предназначена для generated-файлов и не должна превращаться в источник данных.
-
-## Частые Проблемы
-
-Если команда не находит видео, проверь путь:
-
-```bash
-ls data/Right_cam.mp4
-```
-
-Если траектория строится в неверном масштабе, не включай `--imu-use-translation` без отдельной проверки: двойное интегрирование IMU быстро накапливает ошибку.
-
-Если цветная линия не находится, попробуй явно указать цвет:
-
-```bash
-uv run afn-run \
-  --video data/Right_cam.mp4 \
-  --imu data/imu_data.csv \
-  --config configs/right_camera.yaml \
-  --color blue \
-  --auto-color \
-  --out outputs/right_trajectory
-```

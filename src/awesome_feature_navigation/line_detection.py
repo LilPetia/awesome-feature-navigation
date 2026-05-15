@@ -1,8 +1,11 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Sequence, Tuple
+
 import cv2
 import numpy as np
+
 SUPPORTED_COLORS: Tuple[str, ...] = ('red', 'blue', 'green', 'yellow', 'white')
 COLOR_PRESETS = {'red': [([0, 110, 70], [10, 255, 255]), ([170, 110, 70], [180, 255, 255])], 'blue': [([95, 100, 60], [130, 255, 255])], 'green': [([40, 70, 60], [90, 255, 255])], 'yellow': [([18, 90, 90], [38, 255, 255])], 'white': [([0, 0, 180], [180, 70, 255])]}
 
@@ -88,7 +91,7 @@ def _measure_bottom_x(points_xy: np.ndarray, fraction: float, min_points: int, s
         return float(np.mean(window_x))
     return float(np.median(window_x))
 
-def _clip_hsv_triplet(values: Sequence[int]) -> np.ndarray:
+def _clip_hsv_triplet(values: Sequence[int] | np.ndarray) -> np.ndarray:
     arr = np.asarray(values, dtype=int).reshape(3)
     arr[0] = int(np.clip(arr[0], 0, 180))
     arr[1:] = np.clip(arr[1:], 0, 255)
@@ -136,7 +139,7 @@ def resolve_hsv_ranges(cfg: dict) -> List[Tuple[np.ndarray, np.ndarray]]:
 
 class LineDetector:
 
-    def __init__(self, resize_width: int=640):
+    def __init__(self, resize_width: int=640) -> None:
         self.resize_width = resize_width
         self.min_pixels = 10
         self.prev_centerline: Optional[np.ndarray] = None
@@ -194,13 +197,20 @@ class LineDetector:
             x, y = pts[0]
             centerline_img[y, x] = 255
             return centerline_img
-        cv2.polylines(centerline_img, [pts.reshape(-1, 1, 2)], isClosed=False, color=255, thickness=1, lineType=cv2.LINE_AA)
-        return centerline_img
+        drawn = cv2.polylines(
+            centerline_img,
+            [pts.reshape(-1, 1, 2)],
+            isClosed=False,
+            color=(255,),
+            thickness=1,
+            lineType=cv2.LINE_AA,
+        )
+        return np.asarray(drawn, dtype=np.uint8)
 
     def _build_mask(self, hsv_frame: np.ndarray, ranges: Sequence[Tuple[np.ndarray, np.ndarray]]) -> np.ndarray:
         mask = np.zeros(hsv_frame.shape[:2], dtype=np.uint8)
         for low, high in ranges:
-            mask = cv2.bitwise_or(mask, cv2.inRange(hsv_frame, low, high))
+            mask = np.asarray(cv2.bitwise_or(mask, cv2.inRange(hsv_frame, low, high)), dtype=np.uint8)
         return mask
 
     def _auto_tune_ranges(self, hsv_frame: np.ndarray, ranges: Sequence[Tuple[np.ndarray, np.ndarray]], color: str, start_y: int, end_y: int) -> List[Tuple[np.ndarray, np.ndarray]]:
@@ -268,7 +278,7 @@ class LineDetector:
         clean_mask = cv2.morphologyEx(clean_mask, cv2.MORPH_CLOSE, close_kernel)
         _, points_xy = self._calculate_centerline_dt(clean_mask, top_cut, h - bot_cut)
         points_xy = self._smooth_centerline_points(points_xy, smooth_window=int(cfg.get('centerline_smooth_window', 11)), width=w)
-        centerline_img = self._render_centerline(clean_mask.shape, points_xy)
+        centerline_img = self._render_centerline((int(clean_mask.shape[0]), int(clean_mask.shape[1])), points_xy)
         if points_xy.shape[0] < self.min_pixels and self.prev_centerline is not None:
             centerline_img = self.prev_centerline
             points_xy = np.zeros((0, 2), dtype=np.float32)

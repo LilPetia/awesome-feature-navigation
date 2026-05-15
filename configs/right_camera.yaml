@@ -1,4 +1,5 @@
 trajectory_mode: auto
+auto_prefer_tape_line: true
 
 frame_timestamps: ../data/timestamps2.csv
 frame_timestamp_time_scale: 1.0e-9
@@ -28,6 +29,10 @@ vision_yaw_gain: 0.08
 vision_yaw_max_correction: 0.12
 vision_lateral_gain: 0.002
 vision_smoothing_frames: 20
+offline_tape_smoothing: true
+offline_line_smoothing_frames: 31
+offline_line_min_confidence: 0.15
+line_angle_mode: bottom_segment
 centerline_smooth_window: 11
 forward_speed_mps: 0.25
 max_frames: 0

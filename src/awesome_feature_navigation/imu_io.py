@@ -1,9 +1,12 @@
 from __future__ import annotations
-from dataclasses import dataclass
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+
+from typing import Any, List, Mapping, Optional, Sequence, Tuple
+
 import numpy as np
 import pandas as pd
+
 from .imu_preintegration import IMUSample
+
 
 def _norm(s: str) -> str:
     return ''.join((ch for ch in s.lower() if ch.isalnum() or ch in '_'))
@@ -112,7 +115,7 @@ def load_imu_csv(path: str, time_scale: float=1.0, gyro_scale: float=1.0) -> Lis
         samples.append(IMUSample(t=float(ti), accel=np.asarray(ai, dtype=float), omega=np.asarray(wi, dtype=float)))
     return samples
 
-def calibrate_imu_samples(samples: Sequence[IMUSample], cfg: Mapping[str, object]) -> List[IMUSample]:
+def calibrate_imu_samples(samples: Sequence[IMUSample], cfg: Mapping[str, Any]) -> List[IMUSample]:
     if not samples:
         return []
     t = np.array([s.t for s in samples], dtype=float)

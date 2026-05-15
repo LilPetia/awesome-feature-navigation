@@ -6,7 +6,7 @@ from typing import Dict, List, Optional, Sequence
 import cv2
 import numpy as np
 
-from .line_detection import COLOR_PRESETS, LineDetector, SUPPORTED_COLORS
+from .line_detection import COLOR_PRESETS, SUPPORTED_COLORS, LineDetector
 
 
 @dataclass(frozen=True)

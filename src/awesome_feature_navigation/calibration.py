@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 import numpy as np
 import pandas as pd
@@ -26,7 +26,7 @@ def _pick_col(cols: Sequence[str], candidates: Sequence[str]) -> Optional[str]:
     return None
 
 
-def _as_float(value: object, default: float=0.0) -> float:
+def _as_float(value: Any, default: float=0.0) -> float:
     if value is None:
         return default
     try:

@@ -190,8 +190,10 @@ afn-run
 
 ```yaml
 trajectory_mode: auto
+auto_prefer_tape_line: true
 target_color: blue
 auto_video_config: true
+offline_tape_smoothing: true
 loop_average: true
 ```
 
@@ -209,6 +211,7 @@ configs/right_camera.yaml
 
 ```yaml
 trajectory_mode: auto
+auto_prefer_tape_line: true
 frame_timestamps: ../data/timestamps2.csv
 frame_timestamp_time_scale: 1.0e-9
 sync_time_base: auto
@@ -221,6 +224,10 @@ imu_gyro_scale: 0.017453292519943295
 target_color: blue
 hsv_ranges:
   - [95, 100, 60, 130, 255, 255]
+offline_tape_smoothing: true
+offline_line_smoothing_frames: 31
+offline_line_min_confidence: 0.15
+line_angle_mode: bottom_segment
 ```
 
 Относительные пути из YAML резолвятся относительно папки самого конфига.
@@ -518,8 +525,15 @@ estimate_trajectory_with_details()
 | --- | --- |
 | `generic_vio` | Всегда строить траекторию по optical flow и IMU yaw. |
 | `tape_line` | Всегда строить траекторию по синей линии и IMU yaw. |
-| `auto` при наличии IMU | Сначала попробовать `generic_vio`; если результат плохой, перейти в `tape_line`. |
+| `auto` при наличии IMU и `auto_prefer_tape_line: true` | Сначала попробовать `tape_line`; если линия недостаточно надежна, перейти в `generic_vio`. |
+| `auto` при наличии IMU и `auto_prefer_tape_line: false` | Сначала попробовать `generic_vio`; если результат плохой, перейти в `tape_line`. |
 | `auto` без IMU | Использовать `tape_line`. |
+
+`tape_line` считается пригодным, если:
+
+1. Он вернул достаточно точек.
+2. Доля кадров с надежным наблюдением линии не ниже `auto_tape_min_valid_ratio`.
+3. Spatial span траектории ненулевой.
 
 `generic_vio` считается пригодным, если:
 
@@ -749,14 +763,33 @@ TapeObservation(
 - `mask` - бинарная маска синей линии;
 - `centerline_mask` - маска centerline.
 
-### 14.5 Сглаживание наблюдений
+### 14.5 Офлайн-сглаживание наблюдений
 
-`VisionObservationSmoother` применяет exponential smoothing к:
+Так как задача офлайн, `tape_line` не обязан принимать решение сразу на текущем кадре. Режим сначала собирает по всей записи `TapeFrameObservation`:
+
+```text
+t
+dt
+TapeObservation
+line confidence
+IMU delta_yaw
+IMU delta_p
+```
+
+Для каждого наблюдения считается confidence по:
+
+- количеству точек centerline;
+- вертикальному span линии;
+- попаданию линии в нижнюю часть рабочей области;
+- площади mask;
+- валидности `angle_rad`.
+
+Затем `angle_rad` и `bottom_x` сглаживаются симметричным centered weighted average по всей временной последовательности:
 
 - `angle_rad`;
 - `bottom_x`.
 
-Это уменьшает jitter между соседними кадрами.
+Вес кадра равен confidence. Кадры ниже `offline_line_min_confidence` почти не влияют на траекторию. Это не использует будущие данные в онлайн-смысле, потому что весь pipeline офлайн и видео уже полностью доступно.
 
 ### 14.6 Обновление состояния
 
@@ -766,7 +799,7 @@ TapeObservation(
 x, y, yaw
 ```
 
-Для каждого интервала кадров:
+После офлайн-сглаживания для каждого интервала кадров:
 
 1. Считается:
 
@@ -810,39 +843,49 @@ y = y + dy_body * cos(yaw)
 
 7. В траекторию добавляется `TrajectoryPoint(t, x, y, yaw)`.
 
+Скорость при этом не вычисляется из воздуха. Если не включен `imu_use_translation`, масштаб по-прежнему задается `forward_speed_mps`. Офлайн-сглаживание улучшает форму и устойчивость кривой, но не создает новый источник метрической скорости.
+
 ### 14.7 Псевдокод `tape_line`
 
 ```text
-x, y, yaw = 0, 0, 0
+records = []
 last_t = None
 
 for frame_i, frame in video:
     t = frame_time(frame_i)
-    obs = smooth(line_detector.process(frame))
+    obs = line_detector.process(frame)
+    confidence = line_observation_confidence(obs)
 
     if first_frame:
-        append TrajectoryPoint(t, x, y, yaw)
+        records.append(TapeFrameObservation(t, 0, obs, confidence, 0, zero_delta_p))
         last_t = t
         continue
 
     dt = max(t - last_t, epsilon)
     imu_result = preintegrate_imu(last_t, t)
-    yaw += imu_result.delta_yaw
+    records.append(TapeFrameObservation(t, dt, obs, confidence, imu_result.delta_yaw, imu_result.delta_p))
+    last_t = t
+
+smooth_angle = centered_weighted_angle_average(records.angle_rad, records.confidence)
+smooth_bottom_x = centered_weighted_average(records.bottom_x, records.confidence)
+
+x, y, yaw = 0, 0, 0
+append TrajectoryPoint(records[0].t, x, y, yaw)
+
+for i in range(1, len(records)):
+    yaw_pred = yaw + records[i].delta_yaw
+    yaw_next = yaw_pred + visual_yaw_correction(smooth_angle[i], records[i].confidence)
+    yaw_move = midpoint_angle(yaw, yaw_next)
 
     if imu_use_translation:
-        x, y = integrate_delta_p(imu_result.delta_p, yaw)
+        x, y = integrate_delta_p(records[i].delta_p, yaw_move)
     else:
-        x += forward_speed_mps * dt * cos(yaw)
-        y += forward_speed_mps * dt * sin(yaw)
+        x += forward_speed_mps * records[i].dt * cos(yaw_move)
+        y += forward_speed_mps * records[i].dt * sin(yaw_move)
 
-    if obs.angle_rad is finite:
-        yaw += clipped_visual_yaw_correction(obs.angle_rad, dt)
-
-    if obs.bottom_x is finite:
-        x, y = apply_lateral_correction(x, y, yaw, obs.bottom_x, dt)
-
-    append TrajectoryPoint(t, x, y, yaw)
-    last_t = t
+    x, y = apply_lateral_correction(x, y, yaw_next, smooth_bottom_x[i], records[i].confidence)
+    yaw = yaw_next
+    append TrajectoryPoint(records[i].t, x, y, yaw)
 ```
 
 ## 15. Loop averaging
@@ -917,6 +960,7 @@ keep if robust_z <= loop_outlier_sigma
 | В IMU CSV нет нужных колонок | Value error. |
 | В timestamps CSV нет timestamp column | Value error. |
 | GTSAM не установлен | Используется внутренний minimal preintegration. |
+| `tape_line` не прошел quality check в `auto_prefer_tape_line` | Используется fallback `generic_vio`. |
 | `generic_vio` упал или не прошел quality check в `auto` | Используется fallback `tape_line`. |
 | Недостаточно данных для loop averaging | `final_traj = raw_traj`. |
 | Auto color detection не прошел thresholds | Остаются значения цвета и HSV из конфига. |

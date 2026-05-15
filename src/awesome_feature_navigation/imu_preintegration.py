@@ -1,7 +1,10 @@
 from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import Optional, Sequence
+from typing import Any, Optional, Sequence, cast
+
 import numpy as np
+
 try:
     import gtsam
     _HAS_GTSAM = True
@@ -48,7 +51,13 @@ class PreintegrationResult:
     covariance: np.ndarray
     delta_yaw: float
 
-def build_default_params(gravity_mps2: float=9.81, accel_noise_sigma: float=0.2, gyro_noise_sigma: float=0.02, accel_bias_rw_sigma: float=0.0005, gyro_bias_rw_sigma: float=0.0002):
+def build_default_params(
+    gravity_mps2: float=9.81,
+    accel_noise_sigma: float=0.2,
+    gyro_noise_sigma: float=0.02,
+    accel_bias_rw_sigma: float=0.0005,
+    gyro_bias_rw_sigma: float=0.0002,
+) -> object | None:
     if not _HAS_GTSAM:
         return None
     params = gtsam.PreintegrationParams.MakeSharedU(gravity_mps2)
@@ -73,13 +82,13 @@ def _so3_exp(w: np.ndarray) -> np.ndarray:
 
 class IMUPreintegrationWrapper:
 
-    def __init__(self, params=None, initial_bias=None) -> None:
+    def __init__(self, params: object | None=None, initial_bias: object | None=None) -> None:
         self._use_gtsam = _HAS_GTSAM and params is not None
         self._params = params
         self._bias = initial_bias
         self.reset()
 
-    def reset(self, bias=None) -> None:
+    def reset(self, bias: object | None=None) -> None:
         if self._use_gtsam:
             if bias is not None:
                 self._bias = bias
@@ -124,10 +133,11 @@ class IMUPreintegrationWrapper:
         return PreintegrationResult(delta_t=float(self._dt), delta_R=rot, delta_v=self._v.copy(), delta_p=self._p.copy(), covariance=np.zeros((9, 9)), delta_yaw=float(dyaw))
 
 def rot3_yaw(rot: object) -> float:
-    if _HAS_GTSAM and hasattr(rot, 'rpy'):
-        r, p, y = rot.rpy()
+    rpy = getattr(rot, 'rpy', None)
+    if _HAS_GTSAM and callable(rpy):
+        _, _, y = rpy()
         return float(y)
     if isinstance(rot, MinimalRot3):
         return float(rot.rpy()[2])
-    R = np.asarray(rot.matrix(), dtype=float)
+    R = np.asarray(cast(Any, rot).matrix(), dtype=float)
     return float(np.arctan2(R[1, 0], R[0, 0]))

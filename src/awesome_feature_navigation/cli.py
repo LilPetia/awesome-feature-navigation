@@ -1,8 +1,11 @@
 from __future__ import annotations
+
 import argparse
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, List, Optional, Sequence
+
 import yaml
+
 from .auto_config import apply_auto_video_config
 from .calibration import (
     load_camchain_calibration_config,
@@ -10,9 +13,11 @@ from .calibration import (
     load_imu_calibration_config,
 )
 from .imu_io import calibrate_imu_samples, load_imu_csv, shift_imu_samples
+from .imu_preintegration import IMUSample
 from .line_detection import SUPPORTED_COLORS
 from .plotting import save_loop_debug_csv, save_loop_debug_plot, save_trajectory_csv, save_trajectory_plot
 from .trajectory import estimate_trajectory_with_details
+
 
 def _load_cfg(path: Optional[str]) -> Dict:
     cfg: Dict = {}
@@ -42,14 +47,23 @@ def _cfg_bool(value: object, default: bool) -> bool:
 def _looks_like_absolute_seconds(value: float) -> bool:
     return abs(float(value)) > 1_000_000.0
 
-def _merge_calibration_cfg(cfg: Dict, path_value: object, config_path: Optional[Path], loader) -> Optional[Path]:
+def _merge_calibration_cfg(
+    cfg: Dict,
+    path_value: object,
+    config_path: Optional[Path],
+    loader: Callable[[Path], Dict[str, object]],
+) -> Optional[Path]:
     if path_value is None:
         return None
     path = _resolve_path(path_value, config_path)
     cfg.update(loader(path))
     return path
 
-def _normalize_time_base(frame_timestamps, imu_samples, cfg: Dict):
+def _normalize_time_base(
+    frame_timestamps: Optional[Sequence[float]],
+    imu_samples: Optional[List[IMUSample]],
+    cfg: Dict,
+) -> tuple[Optional[List[float]], Optional[List[IMUSample]], bool]:
     if frame_timestamps is None:
         return (None, imu_samples, False)
     frame_timestamps = [float(t) for t in frame_timestamps]
