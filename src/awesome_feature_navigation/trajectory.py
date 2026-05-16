@@ -742,21 +742,44 @@ def _canonicalize_periodic_trajectory(
         statistic = 'median'
     loop_strategy = str(cfg.get('loop_strategy', 'auto') or 'auto').strip().lower()
     anchor = str(cfg.get('loop_start_anchor', 'bottom_left') or 'bottom_left').strip()
-    laps, split_times = _extract_anchor_laps(
-        traj,
-        period=period,
-        samples_per_lap=samples_per_lap,
-        min_fraction=min_fraction,
-        anchor=anchor,
-        search_radius_fraction=anchor_search_fraction,
-    )
-    if len(laps) < 2:
-        laps, split_times = _extract_periodic_laps(
+    manual_bounds_raw = cfg.get('manual_lap_bounds_sec')
+    manual_bounds: List[float] = []
+    if manual_bounds_raw is not None:
+        try:
+            manual_bounds = sorted(float(v) for v in manual_bounds_raw)
+        except (TypeError, ValueError):
+            manual_bounds = []
+    if len(manual_bounds) >= 2:
+        ts_arr, xy_arr = _trajectory_to_arrays(traj)
+        laps = []
+        split_times_list: List[float] = []
+        for lap_idx, (lap_t0, lap_t1) in enumerate(zip(manual_bounds[:-1], manual_bounds[1:])):
+            lap_t0 = float(max(lap_t0, ts_arr[0]))
+            lap_t1 = float(min(lap_t1, ts_arr[-1]))
+            if lap_t1 - lap_t0 < 1e-3:
+                continue
+            lap_xy = _extract_lap_segment(ts=ts_arr, xy=xy_arr, t0=lap_t0, t1=lap_t1, samples_per_lap=samples_per_lap)
+            laps.append((lap_idx, lap_t0, lap_t1, lap_xy))
+            split_times_list.append(lap_t0)
+        if laps:
+            split_times_list.append(laps[-1][2])
+        split_times = np.asarray(split_times_list, dtype=float)
+    else:
+        laps, split_times = _extract_anchor_laps(
             traj,
             period=period,
             samples_per_lap=samples_per_lap,
             min_fraction=min_fraction,
+            anchor=anchor,
+            search_radius_fraction=anchor_search_fraction,
         )
+        if len(laps) < 2:
+            laps, split_times = _extract_periodic_laps(
+                traj,
+                period=period,
+                samples_per_lap=samples_per_lap,
+                min_fraction=min_fraction,
+            )
     if len(laps) < 2:
         return (list(traj), None)
     lap_period = float(np.median([lap_t1 - lap_t0 for _, lap_t0, lap_t1, _ in laps]))

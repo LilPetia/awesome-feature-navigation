@@ -112,6 +112,7 @@ def main() -> None:
     ap.add_argument('--imu-use-translation', action='store_true', help='Use IMU preintegrated translation instead of constant forward speed')
     ap.add_argument('--no-auto-config', action='store_true', help='Disable automatic line color/HSV detection from the video')
     ap.add_argument('--save-loop-debug', action='store_true', help='Save raw trajectory and loop diagnostics in addition to the final trajectory')
+    ap.add_argument('--lap-bounds', default=None, help='Comma-separated lap boundaries in seconds, e.g. "11,53,104". Skips auto lap segmentation and uses these exact boundaries for canonical loop averaging.')
     ap.add_argument('--out', default='trajectory', help='Output prefix (without extension)')
     ap.add_argument('--save-debug', action='store_true', help='Save debug overlay video')
     args = ap.parse_args()
@@ -137,6 +138,22 @@ def main() -> None:
         cfg['camchain_calibration'] = args.camchain
     if args.no_auto_config:
         cfg['auto_video_config'] = False
+    if args.lap_bounds is not None:
+        bounds = []
+        for token in args.lap_bounds.split(','):
+            token = token.strip()
+            if not token:
+                continue
+            if ':' in token:
+                parts = [float(p) for p in token.split(':')]
+                seconds = 0.0
+                for p in parts:
+                    seconds = seconds * 60.0 + p
+                bounds.append(seconds)
+            else:
+                bounds.append(float(token))
+        if len(bounds) >= 2:
+            cfg['manual_lap_bounds_sec'] = bounds
     imu_calibration_path = _merge_calibration_cfg(
         cfg,
         cfg.get('imu_calibration'),
