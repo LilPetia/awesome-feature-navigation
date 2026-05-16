@@ -47,12 +47,44 @@ class LoopAveragingDebug:
 @dataclass
 class TrajectoryEstimateResult:
     raw_traj: List[TrajectoryPoint]
+    smoothed_traj: List[TrajectoryPoint]
     final_traj: List[TrajectoryPoint]
     loop_debug: Optional[LoopAveragingDebug]
     mode: str = 'tape_line'
     relative_scale: bool = False
     estimated_loop_period_sec: Optional[float] = None
     line_valid_ratio: Optional[float] = None
+    tape_diagnostics: Optional['TapeLineDiagnostics'] = None
+
+
+@dataclass(frozen=True)
+class TapeLineDiagnostics:
+    t: np.ndarray
+    confidence: np.ndarray
+    confidence_threshold: float
+    valid_mask: np.ndarray
+    angle_raw: np.ndarray
+    angle_smooth: np.ndarray
+    bottom_x_raw: np.ndarray
+    bottom_x_smooth: np.ndarray
+    speed_mps: np.ndarray
+    delta_yaw_imu: np.ndarray
+
+
+@dataclass(frozen=True)
+class OfflineTapeLineEstimate:
+    raw_traj: List[TrajectoryPoint]
+    smoothed_traj: List[TrajectoryPoint]
+    final_traj: List[TrajectoryPoint]
+    diagnostics: TapeLineDiagnostics
+    line_valid_ratio: float
+
+
+@dataclass(frozen=True)
+class TapeMotionTerms:
+    yaw_values: np.ndarray
+    yaw_moves: np.ndarray
+    lateral_steps_xy: np.ndarray
 
 
 @dataclass(frozen=True)
@@ -693,7 +725,11 @@ def _canonicalize_periodic_trajectory(
         return (list(traj), None)
     samples_per_lap = max(64, int(cfg.get('loop_samples', 512) or 512))
     min_fraction = float(cfg.get('loop_min_fraction', 0.6) or 0.6)
-    harmonics = max(0, int(cfg.get('loop_fourier_harmonics', 3) or 3))
+    harmonics_cfg = cfg.get('loop_fourier_harmonics', 'auto')
+    if str(harmonics_cfg).strip().lower() == 'auto':
+        harmonics = int(np.clip(samples_per_lap // 32, 8, 24))
+    else:
+        harmonics = max(0, int(harmonics_cfg or 0))
     refine_iterations = max(1, int(cfg.get('loop_refine_iterations', 3) or 3))
     outlier_sigma = float(cfg.get('loop_outlier_sigma', 2.5) or 2.5)
     allow_scale = bool(cfg.get('loop_similarity_align', True))
@@ -849,6 +885,31 @@ def _canonicalize_periodic_trajectory(
         )
         final_projected_laps.append(projected_xy)
         final_projection_rmses.append(projection_rmse)
+    kept_count = int(np.sum(keep_mask))
+    min_kept_laps = max(2, int(cfg.get('loop_min_kept_laps', 2) or 2))
+    if kept_count < min_kept_laps:
+        return (list(traj), None)
+    loop_span = float(
+        max(
+            np.ptp(loop_xy[:, 0]) if loop_xy.shape[0] else 0.0,
+            np.ptp(loop_xy[:, 1]) if loop_xy.shape[0] else 0.0,
+            1e-9,
+        )
+    )
+    kept_alignment = np.asarray(
+        [rmse for rmse, keep in zip(final_rmses, keep_mask) if keep],
+        dtype=float,
+    )
+    kept_projection = np.asarray(
+        [rmse for rmse, keep in zip(final_projection_rmses, keep_mask) if keep],
+        dtype=float,
+    )
+    alignment_ratio = float(np.median(kept_alignment) / loop_span)
+    projection_ratio = float(np.median(kept_projection) / loop_span)
+    max_alignment_ratio = float(cfg.get('loop_max_alignment_rmse_ratio', 0.80) or 0.80)
+    max_projection_ratio = float(cfg.get('loop_max_projection_rmse_ratio', 0.70) or 0.70)
+    if alignment_ratio > max_alignment_ratio or projection_ratio > max_projection_ratio:
+        return (list(traj), None)
     loop_debug = LoopAveragingDebug(
         period_sec=lap_period,
         samples_per_lap=samples_per_lap,
@@ -1005,33 +1066,368 @@ def _centered_weighted_angle_average(
     return out
 
 
+def _median_dt(times: np.ndarray) -> float:
+    if times.shape[0] < 2:
+        return 0.0
+    dts = np.diff(np.asarray(times, dtype=float))
+    dts = dts[np.isfinite(dts) & (dts > 1e-9)]
+    if dts.size == 0:
+        return 0.0
+    return float(np.median(dts))
+
+
+def _make_odd_window(window: int) -> int:
+    window = max(1, int(window))
+    if window % 2 == 0:
+        window += 1
+    return window
+
+
+def _resolve_smoothing_window_frames(times: np.ndarray, cfg: Dict) -> int:
+    smoothing_sec = cfg.get('offline_line_smoothing_sec')
+    if smoothing_sec is not None:
+        dt = _median_dt(times)
+        if dt > 0.0:
+            return _make_odd_window(int(round(float(smoothing_sec) / dt)))
+    if cfg.get('offline_line_smoothing_frames') is not None:
+        return _make_odd_window(int(cfg.get('offline_line_smoothing_frames') or 1))
+    dt = _median_dt(times)
+    if dt <= 0.0:
+        return 1
+    total_duration = max(0.0, float(times[-1] - times[0])) if times.size else 0.0
+    auto_sec = float(np.clip(total_duration * 0.015, 0.35, 1.0))
+    return _make_odd_window(int(round(auto_sec / dt)))
+
+
+def _adaptive_confidence_threshold(confidences: np.ndarray, cfg: Dict) -> float:
+    base = float(cfg.get('offline_line_min_confidence', 0.15) or 0.15)
+    if not bool(cfg.get('offline_adaptive_confidence', True)):
+        return base
+    values = np.asarray(confidences, dtype=float)
+    values = values[np.isfinite(values) & (values > 0.0)]
+    if values.size < 4:
+        return base
+    quantile = float(cfg.get('offline_confidence_quantile', 0.2) or 0.2)
+    quantile = float(np.clip(quantile, 0.05, 0.45))
+    percentile_threshold = float(np.quantile(values, quantile))
+    median = float(np.median(values))
+    mad = float(np.median(np.abs(values - median)))
+    robust_floor = median - 1.4826 * mad
+    data_threshold = max(percentile_threshold, robust_floor)
+    max_threshold = float(cfg.get('offline_line_max_confidence_threshold', 0.6) or 0.6)
+    return float(np.clip(max(base, data_threshold), base, max_threshold))
+
+
 def _mid_angle(a: float, b: float) -> float:
     return _blend_angles(a, b, 0.5)
 
 
-def _build_offline_tape_line_trajectory(
+def _compute_tape_motion_terms(
+    records: Sequence[TapeFrameObservation],
+    angles: np.ndarray,
+    bottom_xs: np.ndarray,
+    weights: np.ndarray,
+    cfg: Dict,
+) -> TapeMotionTerms:
+    n = len(records)
+    yaw_values = np.zeros(n, dtype=float)
+    yaw_moves = np.zeros(max(0, n - 1), dtype=float)
+    lateral_steps = np.zeros((max(0, n - 1), 2), dtype=float)
+    k_yaw = float(cfg.get('vision_yaw_gain', 0.08))
+    k_yaw_nonlinear = float(cfg.get('vision_yaw_nonlinear_gain', 0.0) or 0.0)
+    yaw_max = float(cfg.get('vision_yaw_max_correction', 0.12))
+    k_lat = float(cfg.get('vision_lateral_gain', 0.002))
+
+    yaw = 0.0
+    for idx in range(1, n):
+        record = records[idx]
+        dt_frame = max(1e-6, float(record.dt))
+        dyaw_imu = float(record.delta_yaw) if np.isfinite(record.delta_yaw) else 0.0
+        yaw_pred = yaw + dyaw_imu
+        conf = float(weights[idx])
+        conf_scale = float(np.clip(conf, 0.0, 1.0))
+        visual_corr = 0.0
+        if np.isfinite(angles[idx]) and conf_scale > 0.0:
+            yaw_error = float(angles[idx])
+            yaw_cmd = k_yaw * yaw_error
+            if k_yaw_nonlinear != 0.0:
+                yaw_cmd += k_yaw_nonlinear * yaw_error * abs(yaw_error)
+            visual_corr = _clamp(yaw_cmd, -yaw_max, yaw_max) * dt_frame * conf_scale
+        yaw_next = yaw_pred + visual_corr
+        yaw_move = _mid_angle(yaw, yaw_next)
+        yaw_values[idx] = yaw_next
+        yaw_moves[idx - 1] = yaw_move
+
+        if np.isfinite(bottom_xs[idx]) and conf_scale > 0.0:
+            width = float(record.obs.shape_hw[1])
+            err_px = float(bottom_xs[idx] - width * 0.5)
+            dy_body = -k_lat * err_px * dt_frame * conf_scale
+            lateral_steps[idx - 1] = np.array(
+                [
+                    -dy_body * np.sin(yaw_next),
+                    dy_body * np.cos(yaw_next),
+                ],
+                dtype=float,
+            )
+        yaw = yaw_next
+    return TapeMotionTerms(yaw_values=yaw_values, yaw_moves=yaw_moves, lateral_steps_xy=lateral_steps)
+
+
+def _trajectory_from_tape_motion_terms(
+    records: Sequence[TapeFrameObservation],
+    terms: TapeMotionTerms,
+    cfg: Dict,
+    speed_scales: Optional[np.ndarray]=None,
+) -> tuple[List[TrajectoryPoint], np.ndarray]:
+    if not records:
+        return ([], np.zeros(0, dtype=float))
+    v_forward = float(cfg.get('forward_speed_mps', 0.25))
+    use_imu_translation = bool(cfg.get('imu_use_translation', False))
+    speed_values = np.full(len(records), v_forward, dtype=float)
+    x, y = (0.0, 0.0)
+    traj: List[TrajectoryPoint] = [
+        TrajectoryPoint(t=float(records[0].t), x=x, y=y, yaw=float(terms.yaw_values[0])),
+    ]
+    for idx in range(1, len(records)):
+        record = records[idx]
+        dt_frame = max(1e-6, float(record.dt))
+        yaw_move = float(terms.yaw_moves[idx - 1])
+        used_imu_translation = False
+        if use_imu_translation:
+            delta_p = np.asarray(record.delta_p[:2], dtype=float)
+            if np.all(np.isfinite(delta_p)):
+                c, s = (np.cos(yaw_move), np.sin(yaw_move))
+                R = np.array([[c, -s], [s, c]], dtype=float)
+                dp_world = R @ delta_p
+                x += float(dp_world[0])
+                y += float(dp_world[1])
+                speed_values[idx] = float(np.linalg.norm(dp_world) / dt_frame)
+                used_imu_translation = True
+        if not used_imu_translation:
+            scale = 1.0
+            if speed_scales is not None and idx - 1 < speed_scales.shape[0]:
+                scale = float(speed_scales[idx - 1])
+            dist = v_forward * dt_frame
+            dist *= scale
+            x += float(dist * np.cos(yaw_move))
+            y += float(dist * np.sin(yaw_move))
+            speed_values[idx] = v_forward * scale
+
+        x += float(terms.lateral_steps_xy[idx - 1, 0])
+        y += float(terms.lateral_steps_xy[idx - 1, 1])
+        traj.append(TrajectoryPoint(t=float(record.t), x=x, y=y, yaw=float(terms.yaw_values[idx])))
+    if speed_values.shape[0] > 1:
+        speed_values[0] = speed_values[1]
+    return (traj, speed_values)
+
+
+def _trajectory_segment_length(xy: np.ndarray, start_idx: int, end_idx: int) -> float:
+    if end_idx <= start_idx:
+        return 0.0
+    segment = np.asarray(xy[start_idx:end_idx + 1], dtype=float)
+    if segment.shape[0] < 2:
+        return 0.0
+    deltas = np.diff(segment, axis=0)
+    return float(np.sum(np.sqrt(np.sum(deltas * deltas, axis=1))))
+
+
+def _loop_boundary_indices(traj: Sequence[TrajectoryPoint], period: Optional[float], cfg: Dict) -> List[int]:
+    if period is None or period <= 0.0 or len(traj) < 4:
+        return []
+    ts, xy = _trajectory_to_arrays(traj)
+    anchor = str(cfg.get('loop_start_anchor', 'bottom_left') or 'bottom_left').strip()
+    search_fraction = float(cfg.get('loop_anchor_search_fraction', 0.35) or 0.35)
+    min_fraction = float(cfg.get('loop_min_fraction', 0.6) or 0.6)
+    boundaries = _search_anchor_boundaries(
+        ts=ts,
+        xy=xy,
+        period=period,
+        anchor=anchor,
+        search_radius_fraction=search_fraction,
+        min_gap_fraction=min_fraction * 0.8,
+    )
+    indices = [int(idx) for idx, _ in boundaries]
+    if len(indices) < 2:
+        targets = np.arange(float(ts[0]), float(ts[-1]) + period * 0.5, period, dtype=float)
+        indices = [int(np.argmin(np.abs(ts - target))) for target in targets]
+    deduped = sorted(set(idx for idx in indices if 0 <= idx < len(traj)))
+    return deduped if len(deduped) >= 2 else []
+
+
+def _solve_loop_speed_scales(
+    records: Sequence[TapeFrameObservation],
+    terms: TapeMotionTerms,
+    cfg: Dict,
+    loop_period_sec: Optional[float],
+    reference_traj: Sequence[TrajectoryPoint],
+) -> np.ndarray:
+    segment_count = max(0, len(records) - 1)
+    scales = np.ones(segment_count, dtype=float)
+    if (
+        segment_count < 4
+        or not bool(cfg.get('offline_variable_speed', True))
+        or bool(cfg.get('imu_use_translation', False))
+    ):
+        return scales
+    boundaries = _loop_boundary_indices(reference_traj, loop_period_sec, cfg)
+    if len(boundaries) < 2:
+        return scales
+
+    dts = np.asarray([record.dt for record in records[1:]], dtype=float)
+    dts = np.maximum(dts, 1e-6)
+    v_forward = float(cfg.get('forward_speed_mps', 0.25))
+    forward_steps = np.column_stack(
+        (
+            v_forward * dts * np.cos(terms.yaw_moves),
+            v_forward * dts * np.sin(terms.yaw_moves),
+        )
+    )
+    lateral_steps = np.asarray(terms.lateral_steps_xy, dtype=float)
+    rows: List[np.ndarray] = []
+    rhs: List[float] = []
+    prior_weight = float(cfg.get('offline_speed_prior_weight', 1.0) or 1.0)
+    smooth_weight = float(cfg.get('offline_speed_smoothness_weight', 8.0) or 8.0)
+    closure_weight = float(cfg.get('offline_speed_loop_closure_weight', 20.0) or 20.0)
+    prior_scale = float(np.sqrt(prior_weight))
+    smooth_scale = float(np.sqrt(smooth_weight))
+    closure_scale = float(np.sqrt(closure_weight))
+    for idx in range(segment_count):
+        row = np.zeros(segment_count, dtype=float)
+        row[idx] = prior_scale
+        rows.append(row)
+        rhs.append(prior_scale)
+    for idx in range(1, segment_count):
+        row = np.zeros(segment_count, dtype=float)
+        row[idx] = smooth_scale
+        row[idx - 1] = -smooth_scale
+        rows.append(row)
+        rhs.append(0.0)
+
+    xy_ref = np.array([[point.x, point.y] for point in reference_traj], dtype=float)
+    max_error_ratio = float(cfg.get('offline_loop_closure_max_error_ratio', 0.35) or 0.35)
+    closure_rows = 0
+    for start_idx, end_idx in zip(boundaries[:-1], boundaries[1:]):
+        if end_idx <= start_idx + 2:
+            continue
+        path_len = _trajectory_segment_length(xy_ref, start_idx, end_idx)
+        if path_len <= 1e-9:
+            continue
+        closure_error = xy_ref[end_idx] - xy_ref[start_idx]
+        if float(np.linalg.norm(closure_error)) / path_len > max_error_ratio:
+            continue
+        seg_start = max(0, start_idx)
+        seg_end = min(segment_count, end_idx)
+        if seg_end <= seg_start:
+            continue
+        lateral_sum = lateral_steps[seg_start:seg_end].sum(axis=0)
+        target = -lateral_sum
+        for axis in range(2):
+            row = np.zeros(segment_count, dtype=float)
+            row[seg_start:seg_end] = closure_scale * forward_steps[seg_start:seg_end, axis]
+            rows.append(row)
+            rhs.append(float(closure_scale * target[axis]))
+            closure_rows += 1
+    if closure_rows == 0:
+        return scales
+    A = np.vstack(rows)
+    b = np.asarray(rhs, dtype=float)
+    solved, *_ = np.linalg.lstsq(A, b, rcond=None)
+    min_scale = float(cfg.get('offline_speed_min_scale', 0.5) or 0.5)
+    max_scale = float(cfg.get('offline_speed_max_scale', 1.5) or 1.5)
+    return np.clip(np.asarray(solved, dtype=float), min_scale, max_scale)
+
+
+def _trajectory_from_xy(
+    times: np.ndarray,
+    xy: np.ndarray,
+    fallback_yaw: np.ndarray,
+) -> List[TrajectoryPoint]:
+    if xy.shape[0] == 0:
+        return []
+    yaw = np.asarray(fallback_yaw, dtype=float).copy()
+    if xy.shape[0] >= 2:
+        for idx in range(xy.shape[0]):
+            if idx == 0:
+                delta = xy[1] - xy[0]
+            elif idx == xy.shape[0] - 1:
+                delta = xy[-1] - xy[-2]
+            else:
+                delta = xy[idx + 1] - xy[idx - 1]
+            if float(np.linalg.norm(delta)) > 1e-9:
+                yaw[idx] = float(np.arctan2(delta[1], delta[0]))
+    return [
+        TrajectoryPoint(t=float(t), x=float(pt[0]), y=float(pt[1]), yaw=float(yi))
+        for t, pt, yi in zip(times, xy, yaw)
+    ]
+
+
+def _apply_soft_loop_closure(
+    traj: Sequence[TrajectoryPoint],
+    cfg: Dict,
+    loop_period_sec: Optional[float],
+) -> List[TrajectoryPoint]:
+    if not bool(cfg.get('offline_soft_loop_closure', True)):
+        return list(traj)
+    boundaries = _loop_boundary_indices(traj, loop_period_sec, cfg)
+    if len(boundaries) < 2:
+        return list(traj)
+    times, xy = _trajectory_to_arrays(traj)
+    corrected = xy.copy()
+    fallback_yaw = np.asarray([point.yaw for point in traj], dtype=float)
+    max_error_ratio = float(cfg.get('offline_loop_closure_max_error_ratio', 0.35) or 0.35)
+    max_strength = float(cfg.get('offline_soft_loop_closure_max_strength', 0.75) or 0.75)
+    for start_idx, end_idx in zip(boundaries[:-1], boundaries[1:]):
+        if end_idx <= start_idx + 2:
+            continue
+        path_len = _trajectory_segment_length(corrected, start_idx, end_idx)
+        if path_len <= 1e-9:
+            continue
+        error = corrected[end_idx] - corrected[start_idx]
+        error_ratio = float(np.linalg.norm(error)) / path_len
+        if error_ratio > max_error_ratio:
+            continue
+        strength = float(np.clip(1.0 - error_ratio / max(max_error_ratio, 1e-9), 0.0, max_strength))
+        if strength <= 0.0:
+            continue
+        t0 = float(times[start_idx])
+        t1 = float(times[end_idx])
+        denom = max(t1 - t0, 1e-9)
+        for idx in range(start_idx, end_idx + 1):
+            phase = float(np.clip((times[idx] - t0) / denom, 0.0, 1.0))
+            corrected[idx] -= phase * strength * error
+    return _trajectory_from_xy(times, corrected, fallback_yaw)
+
+
+def _build_offline_tape_line_estimate(
     records: Sequence[TapeFrameObservation],
     cfg: Dict,
-) -> tuple[List[TrajectoryPoint], float]:
+    loop_period_sec: Optional[float]=None,
+) -> OfflineTapeLineEstimate:
     if not records:
-        return ([], 0.0)
+        empty = np.zeros(0, dtype=float)
+        diagnostics = TapeLineDiagnostics(
+            t=empty,
+            confidence=empty,
+            confidence_threshold=0.0,
+            valid_mask=np.zeros(0, dtype=bool),
+            angle_raw=empty,
+            angle_smooth=empty,
+            bottom_x_raw=empty,
+            bottom_x_smooth=empty,
+            speed_mps=empty,
+            delta_yaw_imu=empty,
+        )
+        return OfflineTapeLineEstimate([], [], [], diagnostics, 0.0)
     times = np.asarray([record.t for record in records], dtype=float)
-    dts = np.asarray([record.dt for record in records], dtype=float)
-    delta_yaws = np.asarray([record.delta_yaw for record in records], dtype=float)
     angles = np.asarray([record.obs.angle_rad for record in records], dtype=float)
     bottom_xs = np.asarray([record.obs.bottom_x for record in records], dtype=float)
-    widths = np.asarray([record.obs.shape_hw[1] for record in records], dtype=float)
     confidences = np.asarray([record.confidence for record in records], dtype=float)
-    min_confidence = float(cfg.get('offline_line_min_confidence', 0.15) or 0.15)
-    weights = np.where(confidences >= min_confidence, confidences, 0.0)
-    valid_ratio = float(np.mean(weights > 0.0)) if weights.size else 0.0
+    confidence_threshold = _adaptive_confidence_threshold(confidences, cfg)
+    weights = np.where(confidences >= confidence_threshold, confidences, 0.0)
+    valid_mask = weights > 0.0
+    valid_ratio = float(np.mean(valid_mask)) if weights.size else 0.0
 
-    smoothing_frames = int(
-        cfg.get(
-            'offline_line_smoothing_frames',
-            cfg.get('vision_smoothing_frames', 20),
-        ) or 20
-    )
+    smoothing_frames = _resolve_smoothing_window_frames(times, cfg)
     if bool(cfg.get('offline_tape_smoothing', True)):
         smooth_angles = _centered_weighted_angle_average(angles, weights, smoothing_frames)
         smooth_bottom_xs = _centered_weighted_average(bottom_xs, weights, smoothing_frames)
@@ -1039,55 +1435,52 @@ def _build_offline_tape_line_trajectory(
         smooth_angles = angles.copy()
         smooth_bottom_xs = bottom_xs.copy()
 
-    v_forward = float(cfg.get('forward_speed_mps', 0.25))
-    k_yaw = float(cfg.get('vision_yaw_gain', 0.08))
-    k_yaw_nonlinear = float(cfg.get('vision_yaw_nonlinear_gain', 0.0) or 0.0)
-    yaw_max = float(cfg.get('vision_yaw_max_correction', 0.12))
-    k_lat = float(cfg.get('vision_lateral_gain', 0.002))
-    use_imu_translation = bool(cfg.get('imu_use_translation', False))
+    raw_terms = _compute_tape_motion_terms(records, angles, bottom_xs, weights, cfg)
+    raw_traj, _ = _trajectory_from_tape_motion_terms(records, raw_terms, cfg)
 
-    x, y, yaw = (0.0, 0.0, 0.0)
-    traj: List[TrajectoryPoint] = [TrajectoryPoint(t=float(times[0]), x=x, y=y, yaw=yaw)]
-    for idx in range(1, len(records)):
-        dt_frame = max(1e-6, float(dts[idx]))
-        dyaw_imu = float(delta_yaws[idx]) if np.isfinite(delta_yaws[idx]) else 0.0
-        yaw_pred = yaw + dyaw_imu
-        conf = float(weights[idx])
-        conf_scale = float(np.clip(conf, 0.0, 1.0))
-        visual_corr = 0.0
-        if np.isfinite(smooth_angles[idx]) and conf_scale > 0.0:
-            yaw_error = float(smooth_angles[idx])
-            yaw_cmd = k_yaw * yaw_error
-            if k_yaw_nonlinear != 0.0:
-                yaw_cmd += k_yaw_nonlinear * yaw_error * abs(yaw_error)
-            visual_corr = _clamp(yaw_cmd, -yaw_max, yaw_max) * dt_frame * conf_scale
-        yaw_next = yaw_pred + visual_corr
-        yaw_move = _mid_angle(yaw, yaw_next)
+    smooth_terms = _compute_tape_motion_terms(records, smooth_angles, smooth_bottom_xs, weights, cfg)
+    initial_smoothed_traj, _ = _trajectory_from_tape_motion_terms(records, smooth_terms, cfg)
+    speed_scales = _solve_loop_speed_scales(
+        records=records,
+        terms=smooth_terms,
+        cfg=cfg,
+        loop_period_sec=loop_period_sec,
+        reference_traj=initial_smoothed_traj,
+    )
+    smoothed_traj, speed_values = _trajectory_from_tape_motion_terms(
+        records,
+        smooth_terms,
+        cfg,
+        speed_scales=speed_scales,
+    )
+    final_traj = _apply_soft_loop_closure(smoothed_traj, cfg, loop_period_sec)
+    diagnostics = TapeLineDiagnostics(
+        t=times,
+        confidence=confidences,
+        confidence_threshold=confidence_threshold,
+        valid_mask=valid_mask,
+        angle_raw=angles,
+        angle_smooth=smooth_angles,
+        bottom_x_raw=bottom_xs,
+        bottom_x_smooth=smooth_bottom_xs,
+        speed_mps=speed_values,
+        delta_yaw_imu=np.asarray([record.delta_yaw for record in records], dtype=float),
+    )
+    return OfflineTapeLineEstimate(
+        raw_traj=raw_traj,
+        smoothed_traj=smoothed_traj,
+        final_traj=final_traj,
+        diagnostics=diagnostics,
+        line_valid_ratio=valid_ratio,
+    )
 
-        used_imu_translation = False
-        if use_imu_translation:
-            delta_p = np.asarray(records[idx].delta_p[:2], dtype=float)
-            if np.all(np.isfinite(delta_p)):
-                c, s = (np.cos(yaw_move), np.sin(yaw_move))
-                R = np.array([[c, -s], [s, c]], dtype=float)
-                dp_world = R @ delta_p
-                x += float(dp_world[0])
-                y += float(dp_world[1])
-                used_imu_translation = True
-        if not used_imu_translation:
-            dist = v_forward * dt_frame
-            x += float(dist * np.cos(yaw_move))
-            y += float(dist * np.sin(yaw_move))
 
-        if np.isfinite(smooth_bottom_xs[idx]) and conf_scale > 0.0:
-            err_px = float(smooth_bottom_xs[idx] - widths[idx] * 0.5)
-            dy_body = -k_lat * err_px * dt_frame * conf_scale
-            x += float(-dy_body * np.sin(yaw_next))
-            y += float(dy_body * np.cos(yaw_next))
-
-        yaw = yaw_next
-        traj.append(TrajectoryPoint(t=float(times[idx]), x=x, y=y, yaw=yaw))
-    return (traj, valid_ratio)
+def _build_offline_tape_line_trajectory(
+    records: Sequence[TapeFrameObservation],
+    cfg: Dict,
+) -> tuple[List[TrajectoryPoint], float]:
+    estimate = _build_offline_tape_line_estimate(records, cfg)
+    return (estimate.smoothed_traj, estimate.line_valid_ratio)
 
 
 def _write_tape_line_debug_video(
@@ -1520,6 +1913,7 @@ def _estimate_generic_vio_trajectory_with_details(
                 loop_debug = None
     return TrajectoryEstimateResult(
         raw_traj=raw_traj,
+        smoothed_traj=raw_traj,
         final_traj=final_traj,
         loop_debug=loop_debug,
         mode='generic_vio',
@@ -1599,34 +1993,44 @@ def _estimate_tape_line_trajectory_with_details(
         )
         last_t = t
     cap.release()
-    raw_traj, line_valid_ratio = _build_offline_tape_line_trajectory(records, cfg)
-    if save_debug_video is not None and records:
-        _write_tape_line_debug_video(video_path, save_debug_video, fps, records, raw_traj)
-
-    final_traj = raw_traj
-    loop_debug = None
     estimated_period = None
+    loop_period = float(cfg.get('loop_period_sec', 0.0) or 0.0)
+    if loop_period <= 0.0 and auto_loop_enabled:
+        estimated_period = _estimate_loop_period_from_descriptors(frame_descriptor_times, frame_descriptors, cfg)
+        if estimated_period is not None:
+            loop_period = estimated_period
+    offline_estimate = _build_offline_tape_line_estimate(
+        records,
+        cfg,
+        loop_period_sec=loop_period if loop_period > 0.0 else None,
+    )
+    raw_traj = offline_estimate.raw_traj
+    smoothed_traj = offline_estimate.smoothed_traj
+    final_traj = offline_estimate.final_traj
+    if save_debug_video is not None and records:
+        _write_tape_line_debug_video(video_path, save_debug_video, fps, records, smoothed_traj)
+
+    loop_debug = None
     if bool(cfg.get('loop_average', False)):
         loop_cfg = dict(cfg)
-        loop_period = float(loop_cfg.get('loop_period_sec', 0.0) or 0.0)
-        if loop_period <= 0.0 and auto_loop_enabled:
-            estimated_period = _estimate_loop_period_from_descriptors(frame_descriptor_times, frame_descriptors, loop_cfg)
-            if estimated_period is not None:
-                loop_period = estimated_period
-                loop_cfg['loop_period_sec'] = loop_period
         if loop_period > 0.0:
-            final_traj, loop_debug = _canonicalize_periodic_trajectory(raw_traj, loop_cfg)
+            loop_cfg['loop_period_sec'] = loop_period
+            final_traj, loop_debug = _canonicalize_periodic_trajectory(smoothed_traj, loop_cfg)
     reported_period = None
     if loop_debug is not None:
         reported_period = loop_debug.period_sec
+    elif loop_period > 0.0:
+        reported_period = loop_period
     return TrajectoryEstimateResult(
         raw_traj=raw_traj,
+        smoothed_traj=smoothed_traj,
         final_traj=final_traj,
         loop_debug=loop_debug,
         mode='tape_line',
         relative_scale=False,
         estimated_loop_period_sec=reported_period,
-        line_valid_ratio=line_valid_ratio,
+        line_valid_ratio=offline_estimate.line_valid_ratio,
+        tape_diagnostics=offline_estimate.diagnostics,
     )
 
 

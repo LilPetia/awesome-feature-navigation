@@ -15,7 +15,14 @@ from .calibration import (
 from .imu_io import calibrate_imu_samples, load_imu_csv, shift_imu_samples
 from .imu_preintegration import IMUSample
 from .line_detection import SUPPORTED_COLORS
-from .plotting import save_loop_debug_csv, save_loop_debug_plot, save_trajectory_csv, save_trajectory_plot
+from .plotting import (
+    save_loop_debug_csv,
+    save_loop_debug_plot,
+    save_tape_diagnostics_csv,
+    save_tape_diagnostics_plot,
+    save_trajectory_csv,
+    save_trajectory_plot,
+)
 from .trajectory import estimate_trajectory_with_details
 
 
@@ -208,19 +215,33 @@ def main() -> None:
         )
     if result.estimated_loop_period_sec is not None:
         print(f'Estimated loop period: {result.estimated_loop_period_sec:.2f}s')
-    if result.loop_debug is not None and args.save_loop_debug:
+    if args.save_loop_debug:
         raw_csv_path = str(Path(str(out_prefix) + '_raw.csv'))
         raw_html_path = str(Path(str(out_prefix) + '_raw.html'))
-        laps_csv_path = str(Path(str(out_prefix) + '_laps.csv'))
-        laps_html_path = str(Path(str(out_prefix) + '_laps.html'))
+        smooth_csv_path = str(Path(str(out_prefix) + '_smoothed.csv'))
+        smooth_html_path = str(Path(str(out_prefix) + '_smoothed.html'))
         save_trajectory_csv(result.raw_traj, raw_csv_path)
-        save_trajectory_plot(result.raw_traj, raw_html_path, title='Raw Trajectory Before Loop Averaging', axis_unit=axis_unit)
-        save_loop_debug_csv(result.loop_debug, laps_csv_path)
-        save_loop_debug_plot(result.loop_debug, laps_html_path)
+        save_trajectory_plot(result.raw_traj, raw_html_path, title='Raw Trajectory', axis_unit=axis_unit)
+        save_trajectory_csv(result.smoothed_traj, smooth_csv_path)
+        save_trajectory_plot(result.smoothed_traj, smooth_html_path, title='Smoothed Trajectory', axis_unit=axis_unit)
         print(f'Saved: {raw_csv_path}')
         print(f'Saved: {raw_html_path}')
-        print(f'Saved: {laps_csv_path}')
-        print(f'Saved: {laps_html_path}')
+        print(f'Saved: {smooth_csv_path}')
+        print(f'Saved: {smooth_html_path}')
+        if result.tape_diagnostics is not None:
+            diag_csv_path = str(Path(str(out_prefix) + '_diagnostics.csv'))
+            diag_html_path = str(Path(str(out_prefix) + '_diagnostics.html'))
+            save_tape_diagnostics_csv(result.tape_diagnostics, diag_csv_path)
+            save_tape_diagnostics_plot(result.tape_diagnostics, diag_html_path)
+            print(f'Saved: {diag_csv_path}')
+            print(f'Saved: {diag_html_path}')
+        if result.loop_debug is not None:
+            laps_csv_path = str(Path(str(out_prefix) + '_laps.csv'))
+            laps_html_path = str(Path(str(out_prefix) + '_laps.html'))
+            save_loop_debug_csv(result.loop_debug, laps_csv_path)
+            save_loop_debug_plot(result.loop_debug, laps_html_path)
+            print(f'Saved: {laps_csv_path}')
+            print(f'Saved: {laps_html_path}')
     if debug_path is not None:
         print(f'Saved: {debug_path}')
 if __name__ == '__main__':

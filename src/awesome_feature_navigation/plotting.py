@@ -7,7 +7,7 @@ import numpy as np
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from .trajectory import LoopAveragingDebug, TrajectoryPoint
+from .trajectory import LoopAveragingDebug, TapeLineDiagnostics, TrajectoryPoint
 
 _PLOT_COLORS = (
     '#1f77b4',
@@ -88,6 +88,123 @@ def save_trajectory_plot(
         legend=dict(x=0.01, y=0.99),
         template='plotly_white',
         dragmode='pan',
+    )
+    if path.endswith('.html'):
+        fig.write_html(path)
+    else:
+        try:
+            fig.write_image(path, scale=2)
+        except ValueError as e:
+            print(f'Error saving static image using Plotly: {e}')
+            print('To save as PNG/JPG, please install kaleido: pip install kaleido')
+            print('Alternatively, use .html extension for interactive plot.')
+
+
+def save_tape_diagnostics_csv(diagnostics: TapeLineDiagnostics, path: str) -> None:
+    with open(path, 'w', newline='', encoding='utf-8') as f:
+        w = csv.writer(f)
+        w.writerow([
+            't',
+            'confidence',
+            'confidence_threshold',
+            'valid',
+            'angle_raw',
+            'angle_smooth',
+            'bottom_x_raw',
+            'bottom_x_smooth',
+            'speed_mps',
+            'delta_yaw_imu',
+        ])
+        for idx, t in enumerate(diagnostics.t):
+            w.writerow([
+                f'{float(t):.6f}',
+                f'{float(diagnostics.confidence[idx]):.6f}',
+                f'{diagnostics.confidence_threshold:.6f}',
+                int(bool(diagnostics.valid_mask[idx])),
+                f'{float(diagnostics.angle_raw[idx]):.6f}',
+                f'{float(diagnostics.angle_smooth[idx]):.6f}',
+                f'{float(diagnostics.bottom_x_raw[idx]):.6f}',
+                f'{float(diagnostics.bottom_x_smooth[idx]):.6f}',
+                f'{float(diagnostics.speed_mps[idx]):.6f}',
+                f'{float(diagnostics.delta_yaw_imu[idx]):.6f}',
+            ])
+
+
+def save_tape_diagnostics_plot(diagnostics: TapeLineDiagnostics, path: str) -> None:
+    if diagnostics.t.size == 0:
+        print('Warning: Tape diagnostics are empty, skipping diagnostics plot.')
+        return
+    fig = make_subplots(
+        rows=3,
+        cols=1,
+        shared_xaxes=True,
+        subplot_titles=('Line Confidence', 'Line Angle', 'Forward Speed'),
+        vertical_spacing=0.08,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=diagnostics.t,
+            y=diagnostics.confidence,
+            mode='lines',
+            name='confidence',
+            line=dict(color='royalblue', width=2),
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=diagnostics.t,
+            y=np.full_like(diagnostics.t, diagnostics.confidence_threshold, dtype=float),
+            mode='lines',
+            name='threshold',
+            line=dict(color='firebrick', width=1.5, dash='dash'),
+        ),
+        row=1,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=diagnostics.t,
+            y=diagnostics.angle_raw,
+            mode='lines',
+            name='raw angle',
+            line=dict(color='rgba(120, 120, 120, 0.7)', width=1),
+        ),
+        row=2,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=diagnostics.t,
+            y=diagnostics.angle_smooth,
+            mode='lines',
+            name='smoothed angle',
+            line=dict(color='seagreen', width=2),
+        ),
+        row=2,
+        col=1,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=diagnostics.t,
+            y=diagnostics.speed_mps,
+            mode='lines',
+            name='speed',
+            line=dict(color='darkorange', width=2),
+        ),
+        row=3,
+        col=1,
+    )
+    fig.update_yaxes(title_text='score', row=1, col=1)
+    fig.update_yaxes(title_text='rad', row=2, col=1)
+    fig.update_yaxes(title_text='m/s', row=3, col=1)
+    fig.update_xaxes(title_text='t (s)', row=3, col=1)
+    fig.update_layout(
+        title='Tape-Line Diagnostics',
+        template='plotly_white',
+        dragmode='pan',
+        legend=dict(x=0.01, y=0.99),
     )
     if path.endswith('.html'):
         fig.write_html(path)

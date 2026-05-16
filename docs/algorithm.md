@@ -65,7 +65,9 @@ uv run afn-run \
 | `outputs/right_trajectory.csv` | Всегда | Финальная траектория в формате `t,x,y,yaw`. |
 | `outputs/right_trajectory.html` | Всегда | Интерактивный Plotly-график траектории. Сама траектория рисуется синим (`royalblue`). |
 | `outputs/right_trajectory_debug.mp4` | При `--save-debug` | Debug-видео с overlay для optical flow или line detection. |
-| `outputs/right_trajectory_raw.csv/html` | При `--save-loop-debug`, если есть loop diagnostics | Raw trajectory до loop averaging. |
+| `outputs/right_trajectory_raw.csv/html` | При `--save-loop-debug` | Raw trajectory без offline-сглаживания наблюдений. |
+| `outputs/right_trajectory_smoothed.csv/html` | При `--save-loop-debug` | Trajectory после confidence-weighted offline smoothing и variable-speed correction. |
+| `outputs/right_trajectory_diagnostics.csv/html` | При `--save-loop-debug` для `tape_line` | Confidence, raw/smoothed angle, estimated speed и IMU yaw delta по времени. |
 | `outputs/right_trajectory_laps.csv/html` | При `--save-loop-debug`, если есть loop diagnostics | Диагностика кругов, alignment и projection. |
 
 Красный marker в HTML-графике, если он есть, обозначает только конечную точку траектории. Он не обозначает цвет линии на полу и не означает, что траектория робота красная.
@@ -182,7 +184,8 @@ afn-run
   apply Kalibr timeshift
   calibrate IMU samples
   estimate trajectory
-  optionally run loop averaging
+  optionally run soft loop closure
+  build closed representative lap if loop period is reliable
   save CSV and HTML outputs
 ```
 
@@ -194,7 +197,16 @@ auto_prefer_tape_line: true
 target_color: blue
 auto_video_config: true
 offline_tape_smoothing: true
+offline_adaptive_confidence: true
+offline_variable_speed: true
+offline_soft_loop_closure: true
 loop_average: true
+loop_strategy: representative_lap
+loop_similarity_align: false
+loop_fourier_harmonics: auto
+loop_min_kept_laps: 2
+loop_max_alignment_rmse_ratio: 0.80
+loop_max_projection_rmse_ratio: 0.70
 ```
 
 ## 7. Сбор и объединение конфигурации
@@ -225,8 +237,18 @@ target_color: blue
 hsv_ranges:
   - [95, 100, 60, 130, 255, 255]
 offline_tape_smoothing: true
-offline_line_smoothing_frames: 31
+offline_line_smoothing_sec: 0.75
+offline_adaptive_confidence: true
 offline_line_min_confidence: 0.15
+offline_variable_speed: true
+offline_soft_loop_closure: true
+loop_average: true
+loop_strategy: representative_lap
+loop_similarity_align: false
+loop_fourier_harmonics: auto
+loop_min_kept_laps: 2
+loop_max_alignment_rmse_ratio: 0.80
+loop_max_projection_rmse_ratio: 0.70
 line_angle_mode: bottom_segment
 ```
 
@@ -789,7 +811,22 @@ IMU delta_p
 - `angle_rad`;
 - `bottom_x`.
 
-Вес кадра равен confidence. Кадры ниже `offline_line_min_confidence` почти не влияют на траекторию. Это не использует будущие данные в онлайн-смысле, потому что весь pipeline офлайн и видео уже полностью доступно.
+Вес кадра равен confidence. Порог confidence может быть адаптивным:
+
+```yaml
+offline_adaptive_confidence: true
+offline_line_min_confidence: 0.15
+```
+
+`offline_line_min_confidence` в этом режиме является нижней границей, а фактический threshold поднимается по распределению confidence на всем видео. Это уменьшает ручной подбор под конкретную запись: хорошее видео получает более строгий отбор, плохое не теряет все кадры.
+
+Размер окна сглаживания задается временем, а не числом кадров:
+
+```yaml
+offline_line_smoothing_sec: 0.75
+```
+
+Реальное число кадров вычисляется по median frame interval. Поэтому один и тот же конфиг одинаково интерпретируется на видео с разным FPS. Это не использует будущие данные в онлайн-смысле, потому что весь pipeline офлайн и видео уже полностью доступно.
 
 ### 14.6 Обновление состояния
 
@@ -815,13 +852,15 @@ yaw = yaw + delta_yaw_imu
 
 3. Если включено `imu_use_translation: true`, используется `delta_p` из IMU preintegration. В проектном режиме это выключено из-за drift.
 
-4. Если IMU translation не используется, робот продвигается вперед:
+4. Если IMU translation не используется, робот продвигается вперед. Базовый масштаб задает `forward_speed_mps`, но в offline-режиме может быть включена переменная скорость:
 
 ```text
-dist = forward_speed_mps * dt
+dist = forward_speed_mps * speed_scale[i] * dt
 x = x + dist * cos(yaw)
 y = y + dist * sin(yaw)
 ```
+
+`speed_scale[i]` оценивается по всей записи как гладкая последовательность, близкая к `1.0`. Если найден надежный период петли, speed scales дополнительно подбираются из least-squares условия мягкого замыкания кругов. Если периода нет или замыкание выглядит ненадежным, `speed_scale[i] = 1.0`.
 
 5. Угол линии дает yaw correction:
 
@@ -843,7 +882,7 @@ y = y + dy_body * cos(yaw)
 
 7. В траекторию добавляется `TrajectoryPoint(t, x, y, yaw)`.
 
-Скорость при этом не вычисляется из воздуха. Если не включен `imu_use_translation`, масштаб по-прежнему задается `forward_speed_mps`. Офлайн-сглаживание улучшает форму и устойчивость кривой, но не создает новый источник метрической скорости.
+Скорость при этом не вычисляется из воздуха. `forward_speed_mps` остается метрическим масштабом. Новая variable-speed часть меняет относительное распределение скорости по времени, но не создает абсолютный масштаб без внешнего источника.
 
 ### 14.7 Псевдокод `tape_line`
 
@@ -866,8 +905,12 @@ for frame_i, frame in video:
     records.append(TapeFrameObservation(t, dt, obs, confidence, imu_result.delta_yaw, imu_result.delta_p))
     last_t = t
 
-smooth_angle = centered_weighted_angle_average(records.angle_rad, records.confidence)
-smooth_bottom_x = centered_weighted_average(records.bottom_x, records.confidence)
+threshold = adaptive_confidence_threshold(records.confidence)
+weights = records.confidence where confidence >= threshold else 0
+window_frames = smoothing_seconds_to_frames(offline_line_smoothing_sec, frame_times)
+
+smooth_angle = centered_weighted_angle_average(records.angle_rad, weights, window_frames)
+smooth_bottom_x = centered_weighted_average(records.bottom_x, weights, window_frames)
 
 x, y, yaw = 0, 0, 0
 append TrajectoryPoint(records[0].t, x, y, yaw)
@@ -880,26 +923,46 @@ for i in range(1, len(records)):
     if imu_use_translation:
         x, y = integrate_delta_p(records[i].delta_p, yaw_move)
     else:
-        x += forward_speed_mps * records[i].dt * cos(yaw_move)
-        y += forward_speed_mps * records[i].dt * sin(yaw_move)
+        x += forward_speed_mps * speed_scale[i] * records[i].dt * cos(yaw_move)
+        y += forward_speed_mps * speed_scale[i] * records[i].dt * sin(yaw_move)
 
     x, y = apply_lateral_correction(x, y, yaw_next, smooth_bottom_x[i], records[i].confidence)
     yaw = yaw_next
     append TrajectoryPoint(records[i].t, x, y, yaw)
+
+raw_traj = integrate_with_raw_observations(records)
+smoothed_traj = integrate_with_smoothed_observations(records, speed_scale)
+final_traj = apply_soft_loop_closure(smoothed_traj)
 ```
 
-## 15. Loop averaging
+## 15. Soft loop closure и representative-lap финал
 
 ### 15.1 Назначение
 
-Если робот едет по повторяющейся петле, raw trajectory может накапливать drift. `loop_average` строит более стабильную каноническую петлю по нескольким кругам.
+Если робот едет по повторяющейся петле, raw trajectory может накапливать drift. В проектном режиме строятся две разные сущности:
+
+- `smoothed_traj` - полный многокруговой путь после offline smoothing и variable speed;
+- `final_traj` - один замкнутый representative lap, если период круга найден надежно.
+
+Перед построением representative lap может применяться мягкое loop closure к `smoothed_traj`:
+
+- период оценивается по visual descriptors;
+- находятся повторяющиеся boundaries круга;
+- если ошибка замыкания мала относительно длины круга, она распределяется по кругу частично;
+- если ошибка слишком большая, замыкание не применяется.
 
 Активные параметры:
 
 ```yaml
-loop_average: true
 auto_loop_period: true
+offline_soft_loop_closure: true
+loop_average: true
+loop_strategy: representative_lap
+loop_similarity_align: false
+loop_fourier_harmonics: auto
 ```
+
+`loop_strategy: representative_lap` означает, что финальная петля берется из лучшего наблюдаемого круга, а не как средняя synthetic-кривая. `loop_similarity_align: false` запрещает масштабное растяжение кругов при alignment. `loop_fourier_harmonics: auto` выбирает число гармоник от `loop_samples`, чтобы сохранить больше формы, чем низкочастотный эллипс.
 
 ### 15.2 Оценка периода круга
 
@@ -941,16 +1004,41 @@ keep if robust_z <= loop_outlier_sigma
 
 Алгоритм сохраняет минимум `min_keep` кругов.
 
-### 15.6 Построение канонической петли
+### 15.6 Quality gate повторяемости
 
-Финальная петля строится одним из способов:
+После построения candidate loop алгоритм дополнительно проверяет, можно ли считать движение повторяющимся:
+
+```text
+alignment_ratio  = median(kept alignment RMSE) / loop_span
+projection_ratio = median(kept projection RMSE) / loop_span
+```
+
+Финальная замкнутая петля принимается только если:
+
+```yaml
+kept_laps >= loop_min_kept_laps
+alignment_ratio <= loop_max_alignment_rmse_ratio
+projection_ratio <= loop_max_projection_rmse_ratio
+```
+
+Если проверка не проходит, canonical loop не используется. Тогда `final_traj` остается текущей offline-траекторией, а не искусственно замкнутой петлей.
+
+### 15.7 Построение финальной петли
+
+Финальная петля может строиться одним из способов:
 
 1. Mean/median по выровненным кругам.
 2. Fourier smoothing замкнутого пути.
 3. Closed Catmull-Rom spline.
 4. Или выбор representative lap, если он дает более качественную петлю.
 
-Результат становится `final_traj`. Исходный путь сохраняется как `raw_traj`.
+В обычном проектном режиме выбран `representative_lap`:
+
+```text
+raw_traj      = интеграция raw-наблюдений
+smoothed_traj = offline smoothing + variable speed
+final_traj    = closed representative lap from smoothed_traj
+```
 
 ## 16. Ошибки и fallback-поведение
 
@@ -962,7 +1050,8 @@ keep if robust_z <= loop_outlier_sigma
 | GTSAM не установлен | Используется внутренний minimal preintegration. |
 | `tape_line` не прошел quality check в `auto_prefer_tape_line` | Используется fallback `generic_vio`. |
 | `generic_vio` упал или не прошел quality check в `auto` | Используется fallback `tape_line`. |
-| Недостаточно данных для loop averaging | `final_traj = raw_traj`. |
+| Недостаточно данных для soft loop closure | `smoothed_traj` не корректируется мягким замыканием. |
+| Недостаточно данных для representative-lap финала | Замкнутая петля не строится, сохраняется текущий `final_traj`. |
 | Auto color detection не прошел thresholds | Остаются значения цвета и HSV из конфига. |
 
 ## 17. Ограничения текущего алгоритма

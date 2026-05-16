@@ -19,6 +19,12 @@ imu_yaw_bias_window_sec: 1.0
 auto_video_config: true
 auto_loop_period: true
 loop_average: true
+loop_strategy: representative_lap
+loop_similarity_align: false
+loop_fourier_harmonics: auto
+loop_min_kept_laps: 2
+loop_max_alignment_rmse_ratio: 0.80
+loop_max_projection_rmse_ratio: 0.70
 
 target_color: blue
 auto_color_tune: true
@@ -30,8 +36,11 @@ vision_yaw_max_correction: 0.12
 vision_lateral_gain: 0.002
 vision_smoothing_frames: 20
 offline_tape_smoothing: true
-offline_line_smoothing_frames: 31
+offline_line_smoothing_sec: 0.75
+offline_adaptive_confidence: true
 offline_line_min_confidence: 0.15
+offline_variable_speed: true
+offline_soft_loop_closure: true
 line_angle_mode: bottom_segment
 centerline_smooth_window: 11
 forward_speed_mps: 0.25

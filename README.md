@@ -105,6 +105,8 @@ uv run afn-run --help
 
 `--save-debug` - сохранить debug overlay video.
 
+`--save-loop-debug` - сохранить дополнительные `raw`, `smoothed`, diagnostics и, если включен `loop_average`, loop/lap debug outputs.
+
 `--mode` - режим построения траектории: `auto`, `generic_vio`, `tape_line`.
 
 `--frame-timestamps` - CSV с `frame_idx,timestamp_ns`, если нужно переопределить путь из конфига.
@@ -130,7 +132,10 @@ configs/right_camera.yaml
 - gravity alignment;
 - параметры поиска цветной линии;
 - режим `trajectory_mode: auto` с приоритетом line-based `tape_line`;
-- офлайн-сглаживание наблюдений линии перед интеграцией траектории.
+- офлайн-сглаживание наблюдений линии по времени;
+- адаптивный confidence threshold;
+- variable-speed correction для offline-режима;
+- замкнутую финальную representative-lap траекторию, если по видео надежно найден период круга.
 
 Обычно менять CLI-команду не нужно. Если меняется видео или IMU, достаточно подставить новые пути через `--video` и `--imu`.
 
@@ -144,8 +149,9 @@ configs/right_camera.yaml
 6. Поворачивает accel/gyro из IMU frame в camera frame через `T_cam_imu`.
 7. В режиме `auto` сначала пробует line-based `tape_line`, если линия найдена достаточно надежно.
 8. Если `tape_line` непригоден, использует fallback `generic_vio`.
-9. Для `tape_line` офлайн сглаживает угол линии и боковое смещение по всей записи.
-10. Сохраняет результат в CSV и HTML.
+9. Для `tape_line` строит `raw_traj`, затем `smoothed_traj` через offline smoothing, adaptive confidence и variable-speed correction.
+10. Если найден надежный повтор петли, строит замкнутую `final_traj` как representative lap. Полный многокруговой путь остается доступен в `_smoothed.csv/html` при `--save-loop-debug`.
+11. Сохраняет финальный результат в CSV и HTML.
 
 Подробное описание алгоритма:
 
@@ -223,6 +229,10 @@ make fix      # ruff auto-fix для безопасных исправлений
 
 - `test_line_observation_confidence_is_positive_for_clean_centerline` строит искусственную маску линии и centerline без видео и проверяет, что confidence у такого наблюдения больше `0.5`.
 - `test_offline_tape_line_smoothing_ignores_low_confidence_angle_outlier` строит последовательность из пяти искусственных наблюдений: четыре надежных с углом `0`, одно низкоуверенное с выбросом угла `1.5 rad`. Тест проверяет, что offline smoothing игнорирует этот выброс, valid ratio равен `0.8`, финальная траектория идет прямо по `x`, `y` остается около `0`, yaw остается около `0`.
+- `test_time_based_smoothing_window_uses_frame_timestamps` проверяет, что окно сглаживания строится из секунд и реального шага timestamps, а не из жестко заданного числа кадров.
+- `test_adaptive_confidence_threshold_uses_video_distribution` проверяет, что confidence threshold поднимается относительно нижней границы, если распределение confidence на записи это позволяет.
+- `test_offline_tape_line_estimate_separates_raw_smoothed_and_final_outputs` проверяет, что offline-estimator возвращает отдельные `raw_traj`, `smoothed_traj`, `final_traj` и diagnostics, а низкоуверенный выброс не попадает в valid mask.
+- `test_loop_canonicalization_rejects_poorly_aligned_laps` проверяет, что финальная замкнутая петля не принимается, если повторяющиеся круги плохо накладываются относительно размера траектории.
 
 Что эти тесты не проверяют:
 
@@ -231,7 +241,7 @@ make fix      # ruff auto-fix для безопасных исправлений
 - Они не проверяют OpenCV optical flow end-to-end.
 - Они не проверяют физическую точность масштаба в метрах.
 
-Их задача сейчас - зафиксировать критичные контракты вокруг калибровок, времени, IMU-нарезки, выбора цвета линии и offline-сглаживания `tape_line`, чтобы эти части случайно не сломались при следующих правках.
+Их задача сейчас - зафиксировать критичные контракты вокруг калибровок, времени, IMU-нарезки, выбора цвета линии, adaptive confidence, time-based smoothing, offline-сглаживания `tape_line` и quality gate для замкнутой петли, чтобы эти части случайно не сломались при следующих правках.
 
 Проверить только импорт и синтаксис без остальных проверок:
 

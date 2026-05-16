@@ -4,8 +4,13 @@ import pytest
 from awesome_feature_navigation.line_detection import TapeObservation
 from awesome_feature_navigation.trajectory import (
     TapeFrameObservation,
+    TrajectoryPoint,
+    _adaptive_confidence_threshold,
+    _build_offline_tape_line_estimate,
     _build_offline_tape_line_trajectory,
+    _canonicalize_periodic_trajectory,
     _line_observation_confidence,
+    _resolve_smoothing_window_frames,
 )
 
 
@@ -71,3 +76,82 @@ def test_offline_tape_line_smoothing_ignores_low_confidence_angle_outlier() -> N
     assert trajectory[-1].x == pytest.approx(4.0)
     assert trajectory[-1].y == pytest.approx(0.0, abs=1e-9)
     assert trajectory[-1].yaw == pytest.approx(0.0, abs=1e-9)
+
+
+def test_time_based_smoothing_window_uses_frame_timestamps() -> None:
+    times = np.array([0.0, 0.1, 0.2, 0.3, 0.4], dtype=float)
+
+    assert _resolve_smoothing_window_frames(times, {'offline_line_smoothing_sec': 0.5}) == 5
+
+
+def test_adaptive_confidence_threshold_uses_video_distribution() -> None:
+    confidences = np.array([0.05, 0.2, 0.8, 0.9, 1.0], dtype=float)
+
+    threshold = _adaptive_confidence_threshold(
+        confidences,
+        {
+            'offline_line_min_confidence': 0.15,
+            'offline_adaptive_confidence': True,
+        },
+    )
+
+    assert threshold > 0.15
+    assert threshold <= 0.6
+
+
+def test_offline_tape_line_estimate_separates_raw_smoothed_and_final_outputs() -> None:
+    records = [
+        _record(0.0, 0.0, 1.0),
+        _record(1.0, 0.0, 1.0),
+        _record(2.0, 1.5, 0.0),
+        _record(3.0, 0.0, 1.0),
+        _record(4.0, 0.0, 1.0),
+    ]
+    cfg = {
+        'forward_speed_mps': 1.0,
+        'vision_yaw_gain': 1.0,
+        'vision_yaw_max_correction': 1.0,
+        'vision_lateral_gain': 0.0,
+        'offline_tape_smoothing': True,
+        'offline_line_smoothing_sec': 2.0,
+        'offline_line_min_confidence': 0.1,
+        'offline_adaptive_confidence': True,
+    }
+
+    estimate = _build_offline_tape_line_estimate(records, cfg)
+
+    assert len(estimate.raw_traj) == len(records)
+    assert len(estimate.smoothed_traj) == len(records)
+    assert len(estimate.final_traj) == len(records)
+    assert estimate.diagnostics.confidence_threshold >= 0.1
+    assert estimate.diagnostics.valid_mask.tolist() == [True, True, False, True, True]
+
+
+def test_loop_canonicalization_rejects_poorly_aligned_laps() -> None:
+    traj = []
+    for t in np.linspace(0.0, 2.0, 160, endpoint=False):
+        phase = 2.0 * np.pi * (t % 1.0)
+        radius = 1.0 if t < 1.0 else 2.0
+        traj.append(
+            TrajectoryPoint(
+                t=float(t),
+                x=float(radius * np.cos(phase)),
+                y=float(radius * np.sin(phase)),
+                yaw=float(phase),
+            )
+        )
+
+    final_traj, loop_debug = _canonicalize_periodic_trajectory(
+        traj,
+        {
+            'loop_period_sec': 1.0,
+            'loop_samples': 64,
+            'loop_similarity_align': False,
+            'loop_strategy': 'representative_lap',
+            'loop_max_alignment_rmse_ratio': 0.05,
+            'loop_max_projection_rmse_ratio': 0.05,
+        },
+    )
+
+    assert loop_debug is None
+    assert len(final_traj) == len(traj)
