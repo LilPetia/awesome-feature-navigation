@@ -93,6 +93,29 @@ outputs/right_trajectory_debug.mp4
 uv run afn-run --help
 ```
 
+Пример с ручными границами кругов (пропускает авто-сегментацию и усредняет ровно по указанным интервалам — полезно, если робот делал «грязный» круг или долго стоял на старте):
+
+```bash
+uv run afn-run \
+  --video data/Right_cam.mp4 \
+  --imu data/imu_data.csv \
+  --config configs/right_camera.yaml \
+  --lap-bounds "0:11,0:53,1:44" \
+  --save-loop-debug \
+  --out outputs/manual/right
+```
+
+Альтернатива: жёстко обрезать видео по кадрам через отдельный конфиг с `max_frames`. Готовый пример `configs/right_camera_2laps.yaml` (`max_frames: 3120`, ≈ 1:44 при 30 fps) исключает всё после третьего круга:
+
+```bash
+uv run afn-run \
+  --video data/Right_cam.mp4 \
+  --imu data/imu_data.csv \
+  --config configs/right_camera_2laps.yaml \
+  --save-loop-debug \
+  --out outputs/twolaps/right
+```
+
 ## Основные Флаги
 
 `--video` - путь к видео с правой камеры.
@@ -106,6 +129,8 @@ uv run afn-run --help
 `--save-debug` - сохранить debug overlay video.
 
 `--save-loop-debug` - сохранить дополнительные `raw`, `smoothed`, diagnostics и, если включен `loop_average`, loop/lap debug outputs.
+
+`--lap-bounds` - явные границы кругов через запятую в секундах или формате `M:S`/`H:M:S` (например, `"0:11,0:53,1:44"`). Если задан, авто-сегментация кругов пропускается и канонический круг усредняется ровно по указанным интервалам.
 
 `--mode` - режим построения траектории: `auto`, `generic_vio`, `tape_line`.
 
