@@ -490,6 +490,28 @@ def _extract_anchor_laps(
     return (laps, np.asarray(split_times, dtype=float))
 
 
+def _extract_manual_laps(
+    traj: Sequence[TrajectoryPoint],
+    boundaries_sec: Sequence[float],
+    samples_per_lap: int,
+) -> tuple[List[tuple[int, float, float, np.ndarray]], np.ndarray]:
+    ts, xy = _trajectory_to_arrays(traj)
+    bounds = sorted(float(v) for v in boundaries_sec)
+    laps: List[tuple[int, float, float, np.ndarray]] = []
+    split_times: List[float] = []
+    for lap_idx, (lap_t0, lap_t1) in enumerate(zip(bounds[:-1], bounds[1:])):
+        lap_t0 = float(max(lap_t0, ts[0]))
+        lap_t1 = float(min(lap_t1, ts[-1]))
+        if lap_t1 - lap_t0 < 1e-3:
+            continue
+        lap_xy = _extract_lap_segment(ts=ts, xy=xy, t0=lap_t0, t1=lap_t1, samples_per_lap=samples_per_lap)
+        laps.append((lap_idx, lap_t0, lap_t1, lap_xy))
+        split_times.append(lap_t0)
+    if laps:
+        split_times.append(laps[-1][2])
+    return (laps, np.asarray(split_times, dtype=float))
+
+
 def _extract_periodic_laps(
     traj: Sequence[TrajectoryPoint],
     period: float,
@@ -746,24 +768,15 @@ def _canonicalize_periodic_trajectory(
     manual_bounds: List[float] = []
     if manual_bounds_raw is not None:
         try:
-            manual_bounds = sorted(float(v) for v in manual_bounds_raw)
+            manual_bounds = [float(v) for v in manual_bounds_raw]
         except (TypeError, ValueError):
             manual_bounds = []
     if len(manual_bounds) >= 2:
-        ts_arr, xy_arr = _trajectory_to_arrays(traj)
-        laps = []
-        split_times_list: List[float] = []
-        for lap_idx, (lap_t0, lap_t1) in enumerate(zip(manual_bounds[:-1], manual_bounds[1:])):
-            lap_t0 = float(max(lap_t0, ts_arr[0]))
-            lap_t1 = float(min(lap_t1, ts_arr[-1]))
-            if lap_t1 - lap_t0 < 1e-3:
-                continue
-            lap_xy = _extract_lap_segment(ts=ts_arr, xy=xy_arr, t0=lap_t0, t1=lap_t1, samples_per_lap=samples_per_lap)
-            laps.append((lap_idx, lap_t0, lap_t1, lap_xy))
-            split_times_list.append(lap_t0)
-        if laps:
-            split_times_list.append(laps[-1][2])
-        split_times = np.asarray(split_times_list, dtype=float)
+        laps, split_times = _extract_manual_laps(
+            traj,
+            boundaries_sec=manual_bounds,
+            samples_per_lap=samples_per_lap,
+        )
     else:
         laps, split_times = _extract_anchor_laps(
             traj,

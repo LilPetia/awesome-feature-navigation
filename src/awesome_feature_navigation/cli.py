@@ -54,6 +54,21 @@ def _cfg_bool(value: object, default: bool) -> bool:
 def _looks_like_absolute_seconds(value: float) -> bool:
     return abs(float(value)) > 1_000_000.0
 
+def _parse_lap_bounds(raw: str) -> List[float]:
+    bounds: List[float] = []
+    for token in raw.split(','):
+        token = token.strip()
+        if not token:
+            continue
+        if ':' in token:
+            seconds = 0.0
+            for part in token.split(':'):
+                seconds = seconds * 60.0 + float(part)
+            bounds.append(seconds)
+        else:
+            bounds.append(float(token))
+    return bounds
+
 def _merge_calibration_cfg(
     cfg: Dict,
     path_value: object,
@@ -139,19 +154,7 @@ def main() -> None:
     if args.no_auto_config:
         cfg['auto_video_config'] = False
     if args.lap_bounds is not None:
-        bounds = []
-        for token in args.lap_bounds.split(','):
-            token = token.strip()
-            if not token:
-                continue
-            if ':' in token:
-                parts = [float(p) for p in token.split(':')]
-                seconds = 0.0
-                for p in parts:
-                    seconds = seconds * 60.0 + p
-                bounds.append(seconds)
-            else:
-                bounds.append(float(token))
+        bounds = _parse_lap_bounds(args.lap_bounds)
         if len(bounds) >= 2:
             cfg['manual_lap_bounds_sec'] = bounds
     imu_calibration_path = _merge_calibration_cfg(
