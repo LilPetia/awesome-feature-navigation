@@ -1076,12 +1076,3 @@ final_traj    = closed representative lap from smoothed_traj
 6. При `--save-debug` debug-видео показывает синюю line mask или стабильные feature tracks.
 7. CLI выводит путь к frame timestamps и YAML-калибровкам.
 8. Если `auto` перешел из `generic_vio` в `tape_line`, итоговый mode виден в CLI output.
-
-## 19. Рекомендуемые инженерные улучшения
-
-Для более строгой метрической траектории:
-
-1. Использовать camera intrinsics и distortion coefficients для undistort кадров.
-2. Использовать ZED stereo/depth для восстановления метрического масштаба.
-3. Заменить lightweight `generic_vio` на ORB-SLAM3, OpenVINS или VINS-Fusion.
-4. Оставить детектор синей линии как domain-specific fallback или дополнительное ограничение, а не как единственный источник навигации.
