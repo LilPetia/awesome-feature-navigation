@@ -1,0 +1,192 @@
+%! Author = arturadamov
+%! Date = 5/17/26
+
+\documentclass[aspectratio=169]{beamer}
+
+\usepackage{fontspec}
+\IfFontExistsTF{Times New Roman}{\setmainfont{Times New Roman}}{\setmainfont{TeX Gyre Termes}}
+\IfFontExistsTF{Arial}{\setsansfont{Arial}}{\setsansfont{TeX Gyre Heros}}
+\IfFontExistsTF{Menlo}{\setmonofont{Menlo}}{\setmonofont{DejaVu Sans Mono}}
+\usepackage[russian]{babel}
+\usepackage{booktabs}
+\usepackage{array}
+
+\usetheme{Madrid}
+\usecolortheme{default}
+\setbeamertemplate{navigation symbols}{}
+\setbeamertemplate{itemize items}[circle]
+
+\title{Awesome Feature Navigation}
+\subtitle{Построение 2D-траектории робота по видео правой камеры и IMU}
+\author{Проектная презентация}
+\date{\today}
+
+\newcommand{\project}{\texttt{awesome-feature-navigation}}
+\newcommand{\code}[1]{\texttt{#1}}
+\newcommand{\filecell}[1]{\begin{tabular}[t]{@{}l@{}}#1\end{tabular}}
+
+\begin{document}
+
+\begin{frame}
+    \titlepage
+\end{frame}
+
+\begin{frame}{Цель проекта}
+    \begin{itemize}
+        \item \project{} строит 2D-траекторию робота по офлайн-записи.
+        \item Основные источники данных: видео правой камеры ZED, IMU CSV, timestamps кадров и Kalibr YAML-калибровки.
+        \item Результат сохраняется как CSV и интерактивный HTML-график Plotly.
+        \item Проект не заявляет полноценный visual-inertial SLAM: это прикладной пайплайн для текущей задачи и текущих данных.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Входные данные}
+    \small
+    \begin{tabular}{>{\raggedright\arraybackslash}p{0.30\textwidth} >{\raggedright\arraybackslash}p{0.56\textwidth}}
+        \toprule
+        Файл & Роль в пайплайне \\
+        \midrule
+        \filecell{\code{data/}\\\code{Right\_cam.mp4}} & Видео правой камеры, где видна линия движения. \\
+        \filecell{\code{data/}\\\code{imu\_data.csv}} & Ускорения и угловые скорости IMU. \\
+        \filecell{\code{data/}\\\code{timestamps2.csv}} & Реальные timestamps кадров из SVO/ZED. \\
+        \filecell{\code{data/imu-}\\\code{imu\_calibration.yaml}} & Шумы IMU и random walk из Kalibr. \\
+        \filecell{\code{data/camchain-}\\\code{imucam-imu\_}\\\code{calibration.yaml}} & \code{T\_cam\_imu}, \code{timeshift\_cam\_imu} и параметры камеры. \\
+        \bottomrule
+    \end{tabular}
+\end{frame}
+
+\begin{frame}[fragile]{Типовой запуск}
+    Основная команда проекта:
+    \begin{verbatim}
+uv run afn-run \
+  --video data/Right_cam.mp4 \
+  --imu data/imu_data.csv \
+  --config configs/right_camera.yaml \
+  --out outputs/right_trajectory
+    \end{verbatim}
+
+    При необходимости добавляются \code{--save-debug}, \code{--save-loop-debug},
+    \code{--lap-bounds} и \code{--mode}.
+\end{frame}
+
+\begin{frame}{Архитектура}
+    \begin{tabular}{>{\raggedright\arraybackslash}p{0.38\textwidth} >{\raggedright\arraybackslash}p{0.48\textwidth}}
+        \toprule
+        Модуль & Ответственность \\
+        \midrule
+        \code{cli.py} & CLI, конфиг, запуск пайплайна. \\
+        \code{calibration.py} & Timestamps и Kalibr YAML. \\
+        \code{imu\_io.py} & IMU CSV, time shift, remap осей, поворот в camera frame. \\
+        \code{imu\_preintegration.py} & IMU preintegration и fallback-интегратор. \\
+        \code{line\_detection.py} & Детекция цветной линии и centerline. \\
+        \code{auto\_config.py} & Автонастройка HSV и цвета линии. \\
+        \code{trajectory.py} & Оценка траектории, режимы, loop averaging. \\
+        \code{plotting.py} & CSV и HTML-графики. \\
+        \bottomrule
+    \end{tabular}
+\end{frame}
+
+\begin{frame}{Конфигурация проекта}
+    Активный профиль лежит в \code{configs/right\_camera.yaml}.
+
+    \begin{itemize}
+        \item \code{trajectory\_mode: auto}: режим выбирается автоматически.
+        \item \code{auto\_prefer\_tape\_line: true}: сначала пробуется движение по линии.
+        \item \code{target\_color: blue}: для текущей записи линия синяя.
+        \item \code{offline\_tape\_smoothing: true}: наблюдения линии сглаживаются по всей записи.
+        \item \code{offline\_adaptive\_confidence: true}: порог надежности зависит от распределения confidence.
+        \item \code{loop\_strategy: representative\_lap}: финал может быть одним замкнутым representative lap.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Синхронизация и калибровки}
+    \begin{itemize}
+        \item Timestamps кадров и IMU переводятся из наносекунд в секунды.
+        \item При абсолютном времени оба потока нормализуются относительно первого видеокадра.
+        \item Kalibr-соглашение: \code{t\_imu = t\_cam + timeshift\_cam\_imu}.
+        \item Для нарезки IMU по времени камеры применяется сдвиг \code{-timeshift\_cam\_imu}.
+        \item Векторы IMU поворачиваются в camera frame через \code{T\_cam\_imu}.
+        \item Для 2D-задачи включены gravity alignment и yaw-only подготовка.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Выбор режима траектории}
+    \begin{itemize}
+        \item \code{tape\_line}: основной режим для текущего видео, где видна синяя линия.
+        \item \code{generic\_vio}: fallback по optical flow и IMU yaw, если линия недостаточно надежна.
+        \item \code{auto}: проверяет пригодность результата по числу точек, доле надежных кадров и spatial span.
+        \item Monocular \code{generic\_vio} дает относительный масштаб; метрический масштаб в \code{tape\_line} задает \code{forward\_speed\_mps}.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Режим tape\_line}
+    \begin{itemize}
+        \item Кадр уменьшается, переводится в HSV, затем по blue HSV-диапазону строится маска линии.
+        \item Из маски оставляется крупнейшая компонента, рабочая ROI очищается от нерелевантных областей.
+        \item Centerline строится через distance transform, затем сглаживается.
+        \item Для каждого кадра сохраняются \code{angle\_rad}, \code{bottom\_x}, confidence и IMU delta yaw.
+        \item После офлайн-сглаживания интегрируются \code{x}, \code{y}, \code{yaw} с учетом yaw correction и lateral correction.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Режим generic\_vio}
+    \begin{itemize}
+        \item На grayscale-кадрах выбираются feature points через \code{goodFeaturesToTrack}.
+        \item Между кадрами точки отслеживаются Lucas-Kanade optical flow.
+        \item Forward-backward check отбрасывает нестабильные треки.
+        \item \code{estimateAffinePartial2D} оценивает 2D-transform с RANSAC.
+        \item Visual yaw смешивается с IMU yaw; при слабом tracking вес IMU повышается.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Loop closure и финальный круг}
+    \begin{itemize}
+        \item Для повторяющейся траектории проект пытается оценить период круга по compact grayscale descriptors.
+        \item Полный путь сохраняется как \code{smoothed\_traj}.
+        \item Если круги согласованы по quality gate, строится замкнутый \code{final\_traj}.
+        \item При \code{representative\_lap} финальная петля берется из лучшего наблюдаемого круга.
+        \item Плохие круги отбрасываются по alignment RMSE и projection RMSE.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Выходные артефакты}
+    \begin{itemize}
+        \item \code{outputs/right\_trajectory.csv}: финальная траектория \code{t,x,y,yaw}.
+        \item \code{outputs/right\_trajectory.html}: интерактивный Plotly-график.
+        \item \code{*\_raw.csv/html}: путь до offline-сглаживания.
+        \item \code{*\_smoothed.csv/html}: полный сглаженный многокруговой путь.
+        \item \code{*\_diagnostics.csv/html}: confidence, углы линии, скорость и IMU yaw delta.
+        \item \code{*\_laps.csv/html}: диагностика кругов и alignment.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Проверки качества}
+    \begin{itemize}
+        \item \code{pytest}: тесты калибровки, IMU IO, line detection и offline tape-line логики.
+        \item \code{ruff}: стиль, импорты, аннотации и часть потенциальных ошибок.
+        \item \code{mypy}: статическая проверка типов для \code{src} и \code{tests}.
+        \item \code{compileall}: проверка импортируемого Python-кода на синтаксис.
+        \item Текущий coverage badge в репозитории показывает \code{34.8\%}.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Ограничения и допущения}
+    \begin{itemize}
+        \item Видео \code{Right\_cam.mp4} может не храниться в Git из-за размера.
+        \item \code{tape\_line} зависит от видимости синей линии и корректных HSV-настроек.
+        \item \code{forward\_speed\_mps} задает метрический масштаб, поэтому ошибка скорости влияет на масштаб траектории.
+        \item \code{generic\_vio} без depth или stereo не восстанавливает надежный абсолютный масштаб.
+        \item Camera-IMU translation загружается, но в текущей 2D-оценке позы не используется.
+    \end{itemize}
+\end{frame}
+
+\begin{frame}{Итог}
+    \begin{itemize}
+        \item Проект объединяет видео, IMU и Kalibr-калибровки в воспроизводимый CLI-пайплайн.
+        \item Основной проектный сценарий - офлайн-навигация по синей линии с IMU yaw.
+        \item Система сохраняет финальный результат, отладочные траектории и диагностику качества.
+        \item Автоматический выбор режима и loop quality gate уменьшают риск принять плохую траекторию за финальную.
+    \end{itemize}
+\end{frame}
+
+\end{document}

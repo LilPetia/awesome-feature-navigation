@@ -1,0 +1,86 @@
+%! Author = arturadamov
+%! Date = 5/17/26
+
+\documentclass[12pt,a4paper]{article}
+
+\usepackage{fontspec}
+\IfFontExistsTF{Times New Roman}{\setmainfont{Times New Roman}}{\setmainfont{TeX Gyre Termes}}
+\IfFontExistsTF{Arial}{\setsansfont{Arial}}{\setsansfont{TeX Gyre Heros}}
+\IfFontExistsTF{Menlo}{\setmonofont{Menlo}}{\setmonofont{DejaVu Sans Mono}}
+\usepackage[russian]{babel}
+\usepackage[a4paper,margin=2cm]{geometry}
+\emergencystretch=3em
+
+\title{Речь к презентации проекта Awesome Feature Navigation}
+\author{Проектная презентация}
+\date{\today}
+
+\newcommand{\project}{\texttt{awesome-feature-navigation}}
+\newcommand{\code}[1]{\texttt{#1}}
+
+\begin{document}
+\sloppy
+
+\maketitle
+
+\section*{Слайд 1. Титульный слайд}
+
+Здравствуйте. Я представляю проект \project{}. Это Python-библиотека и CLI-инструмент для построения 2D-траектории робота по видео с правой камеры ZED и данным IMU. Важная формулировка: проект решает прикладную задачу восстановления траектории для нашей записи, а не претендует на полноценный visual-inertial SLAM.
+
+\section*{Слайд 2. Цель проекта}
+
+Цель проекта - получить понятную траекторию движения робота из уже записанных данных. На входе есть видео, IMU CSV, timestamps кадров и Kalibr-калибровки. На выходе проект сохраняет CSV с точками \code{t,x,y,yaw} и HTML-график, который можно открыть в браузере. Основной сценарий сейчас офлайн: мы анализируем всю запись целиком и можем использовать сглаживание по времени.
+
+\section*{Слайд 3. Входные данные}
+
+Основной видеофайл ожидается как \code{data/Right\_cam.mp4}. IMU лежит в \code{data/imu\_data.csv}. Для синхронизации с видео используется \code{data/timestamps2.csv}, где находятся реальные timestamps кадров. Еще два важных файла приходят из Kalibr: \code{imu-imu\_calibration.yaml} с шумами IMU и \code{camchain-imucam-imu\_calibration.yaml} с трансформацией между камерой и IMU, а также time shift.
+
+\section*{Слайд 4. Типовой запуск}
+
+Проект запускается командой \code{uv run afn-run}. В обычном запуске мы передаем путь к видео, путь к IMU, конфиг \code{configs/right\_camera.yaml} и output prefix. После выполнения появляются \code{outputs/right\_trajectory.csv} и \code{outputs/right\_trajectory.html}. Для анализа качества можно добавить \code{--save-loop-debug}, тогда сохраняются raw, smoothed, diagnostics и laps outputs.
+
+\section*{Слайд 5. Архитектура}
+
+Код разделен по зонам ответственности. \code{cli.py} собирает конфигурацию и запускает пайплайн. \code{calibration.py} читает timestamps и Kalibr YAML. \code{imu\_io.py} загружает IMU, применяет временной сдвиг, remap осей и поворот в camera frame. \code{line\_detection.py} отвечает за поиск цветной линии. Основная логика оценки траектории находится в \code{trajectory.py}, а сохранение CSV и HTML вынесено в \code{plotting.py}.
+
+\section*{Слайд 6. Конфигурация проекта}
+
+Главный конфиг - \code{configs/right\_camera.yaml}. В нем включен \code{trajectory\_mode: auto}, а значит проект сам выбирает подходящий estimator. Для нашей записи установлен приоритет \code{tape\_line}, потому что на видео видна синяя линия. Поэтому \code{target\_color} равен \code{blue}. Также включены offline smoothing, adaptive confidence, variable speed и representative lap для финального замкнутого круга.
+
+\section*{Слайд 7. Синхронизация и калибровки}
+
+Одна из важных частей проекта - правильно привести время и координаты. Timestamps кадров и IMU переводятся из наносекунд в секунды. Если время выглядит абсолютным, оба потока нормализуются относительно первого видеокадра. Kalibr задает \code{timeshift\_cam\_imu} по соглашению \code{t\_imu = t\_cam + timeshift\_cam\_imu}, поэтому IMU сдвигается на минус это значение, чтобы нарезать измерения по времени камеры. Затем accel и gyro поворачиваются из IMU frame в camera frame через \code{T\_cam\_imu}.
+
+\section*{Слайд 8. Выбор режима траектории}
+
+В проекте есть два режима. \code{tape\_line} использует синюю линию в кадре и IMU yaw. Это основной режим для текущего видео. \code{generic\_vio} использует optical flow и IMU yaw, но масштаб в нем относительный, потому что по monocular-видео без depth или stereo нельзя надежно получить абсолютный масштаб. В режиме \code{auto} проект сначала пробует предпочтительный estimator и проверяет, достаточно ли точек, надежных кадров и spatial span.
+
+\section*{Слайд 9. Режим tape\_line}
+
+В \code{tape\_line} каждый кадр уменьшается, переводится в HSV, затем по blue HSV-диапазону строится бинарная маска линии. Из маски оставляется крупнейшая компонента, после чего строится centerline через distance transform. Для кадра сохраняются угол линии, позиция линии внизу кадра, confidence и IMU delta yaw. После этого наблюдения сглаживаются по всей записи, а состояние \code{x,y,yaw} интегрируется с forward speed, yaw correction и lateral correction.
+
+\section*{Слайд 10. Режим generic\_vio}
+
+\code{generic\_vio} нужен как fallback, когда линия плохо видна. Он берет grayscale-кадры, находит feature points, отслеживает их Lucas-Kanade optical flow и отбрасывает нестабильные треки через forward-backward check. Затем через \code{estimateAffinePartial2D} оценивается 2D-transform. Visual yaw смешивается с IMU yaw: если tracking слабый, вес IMU становится выше.
+
+\section*{Слайд 11. Loop closure и финальный круг}
+
+Если робот ездит по повторяющейся петле, траектория может дрейфовать. Поэтому проект пытается оценить период круга по compact grayscale descriptors. Полный сглаженный путь остается доступен как \code{smoothed\_traj}. Если круги хорошо согласованы, строится \code{final\_traj} - один замкнутый representative lap. Плохие круги не принимаются: для этого есть проверки по alignment RMSE и projection RMSE.
+
+\section*{Слайд 12. Выходные артефакты}
+
+Минимальный результат - это \code{outputs/right\_trajectory.csv} и \code{outputs/right\_trajectory.html}. Если включить loop debug, появляются \code{raw}, \code{smoothed}, \code{diagnostics} и \code{laps} файлы. Это важно, потому что можно отдельно посмотреть исходную траекторию, сглаженный путь, confidence линии, оценки углов, speed и качество нарезки кругов.
+
+\section*{Слайд 13. Проверки качества}
+
+В проекте есть несколько уровней проверок. \code{pytest} покрывает загрузку калибровок, работу с IMU, выбор HSV-диапазонов и offline tape-line логику. \code{ruff} проверяет стиль, импорты и часть потенциальных ошибок. \code{mypy} проверяет типы. \code{compileall} дополнительно проверяет синтаксис Python-файлов. В бейдже сейчас указан coverage \code{34.8\%}, то есть тесты есть, но зону покрытия еще можно расширять.
+
+\section*{Слайд 14. Ограничения и допущения}
+
+У проекта есть честные ограничения. Видео может не лежать в Git из-за размера, его нужно положить в \code{data} вручную. Режим \code{tape\_line} зависит от того, насколько хорошо видна синяя линия и насколько подходят HSV-настройки. Метрический масштаб задается \code{forward\_speed\_mps}, поэтому ошибка фактической скорости влияет на масштаб. Translation из \code{T\_cam\_imu} загружается, но текущая 2D-оценка позы его не использует.
+
+\section*{Слайд 15. Итог}
+
+Итог такой: проект превращает видео, IMU и Kalibr-калибровки в воспроизводимый CLI-пайплайн. Основной сценарий - офлайн-навигация по синей линии с IMU yaw. Система сохраняет не только финальный результат, но и отладочные траектории и диагностику качества. За счет режима \code{auto} и quality gate для кругов проект снижает риск принять плохую оценку траектории за финальную.
+
+\end{document}
