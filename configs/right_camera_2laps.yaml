@@ -1,0 +1,58 @@
+trajectory_mode: auto
+auto_prefer_tape_line: true
+
+frame_timestamps: ../data/timestamps2.csv
+frame_timestamp_time_scale: 1.0e-9
+sync_time_base: auto
+
+imu_calibration: ../data/imu-imu_calibration.yaml
+camchain_calibration: ../data/camchain-imucam-imu_calibration.yaml
+imu_time_scale: 1.0e-9
+imu_gyro_scale: 0.017453292519943295
+imu_apply_camchain_rotation: true
+imu_apply_camchain_timeshift: true
+imu_align_gravity: true
+imu_yaw_axis: z
+imu_yaw_only: true
+imu_yaw_bias_window_sec: 1.0
+
+auto_video_config: true
+auto_loop_period: true
+loop_average: true
+loop_strategy: representative_lap
+loop_similarity_align: false
+loop_fourier_harmonics: 12
+loop_min_kept_laps: 2
+loop_max_alignment_rmse_ratio: 0.80
+loop_max_projection_rmse_ratio: 0.70
+manual_lap_bounds_sec:
+  - 11.0
+  - 53.0
+  - 104.0
+manual_lap_directions:
+  - forward
+  - forward
+loop_average_direction: any
+loop_normalize_reverse_laps: true
+loop_start_anchor: manual_start
+trajectory_output_flip_x: true
+
+target_color: blue
+auto_color_tune: true
+hsv_ranges:
+  - [95, 100, 60, 130, 255, 255]
+
+vision_yaw_gain: 0.08
+vision_yaw_max_correction: 0.12
+vision_lateral_gain: 0.002
+vision_smoothing_frames: 20
+offline_tape_smoothing: true
+offline_line_smoothing_sec: 0.75
+offline_adaptive_confidence: true
+offline_line_min_confidence: 0.15
+offline_variable_speed: true
+offline_soft_loop_closure: true
+line_angle_mode: bottom_segment
+centerline_smooth_window: 11
+forward_speed_mps: 0.25
+max_frames: 3120

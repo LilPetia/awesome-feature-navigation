@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.10"
+          - "3.11"
+          - "3.12"
+          - "3.13"
+          - "3.14"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: uv sync --group dev
+
+      - name: Run Ruff
+        run: uv run ruff check .
+
+      - name: Run Mypy
+        run: uv run mypy
+
+      - name: Run Pytest
+        run: uv run pytest --cov=awesome_feature_navigation --cov-report=term-missing --cov-report=xml:coverage.xml --cov-fail-under=95
+
+      - name: Summarize coverage
+        if: matrix.python-version == '3.12'
+        run: uv run python scripts/coverage_summary.py coverage.xml
+
+      - name: Upload coverage report
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-python-3.12
+          path: coverage.xml
+
+  coverage-badge:
+    name: Coverage badge
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-python-3.12
+          path: .
+
+      - name: Update coverage badge
+        run: python scripts/coverage_summary.py coverage.xml --badge badges/coverage.json
+
+      - name: Commit coverage badge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add badges/coverage.json
+          if git diff --cached --quiet; then
+            echo "Coverage badge is up to date."
+            exit 0
+          fi
+          git commit -m "Update coverage badge [skip ci]"
+          git push origin HEAD:${{ github.ref_name }}
