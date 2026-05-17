@@ -21,7 +21,7 @@ auto_loop_period: true
 loop_average: true
 loop_strategy: representative_lap
 loop_similarity_align: false
-loop_fourier_harmonics: auto
+loop_fourier_harmonics: 12
 loop_min_kept_laps: 2
 loop_max_alignment_rmse_ratio: 0.80
 loop_max_projection_rmse_ratio: 0.70

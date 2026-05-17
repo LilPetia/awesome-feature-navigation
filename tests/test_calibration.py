@@ -4,6 +4,8 @@ import numpy as np
 import pytest
 
 from awesome_feature_navigation.calibration import (
+    _as_float,
+    _pick_col,
     load_camchain_calibration_config,
     load_frame_timestamps_csv,
     load_imu_calibration_config,
@@ -98,3 +100,37 @@ def test_load_frame_timestamps_csv_sorts_by_frame_and_scales_time(tmp_path: Path
     )
 
     assert load_frame_timestamps_csv(path, time_scale=1.0e-9) == [1.0, 2.0, 3.0]
+
+
+def test_calibration_helpers_and_invalid_inputs(tmp_path: Path) -> None:
+    assert _pick_col(['camera_timestamp_ns'], ['timestamp']) == 'camera_timestamp_ns'
+    assert _pick_col(['frame'], ['missing']) is None
+    assert _as_float(None, default=1.5) == pytest.approx(1.5)
+    assert _as_float('bad', default=2.5) == pytest.approx(2.5)
+
+    no_time = tmp_path / 'no_time.csv'
+    no_time.write_text('frame,value\n0,1\n', encoding='utf-8')
+    with pytest.raises(ValueError, match='timestamp column'):
+        load_frame_timestamps_csv(no_time)
+
+    empty = tmp_path / 'empty.csv'
+    empty.write_text('timestamp_ns\n', encoding='utf-8')
+    with pytest.raises(ValueError, match='No frame timestamps'):
+        load_frame_timestamps_csv(empty)
+
+    nonfinite = tmp_path / 'nonfinite.csv'
+    nonfinite.write_text('timestamp_ns\nnan\n', encoding='utf-8')
+    with pytest.raises(ValueError, match='non-finite'):
+        load_frame_timestamps_csv(nonfinite)
+
+    bad_imu = tmp_path / 'bad_imu.yaml'
+    bad_imu.write_text('imu0: [1, 2]\n', encoding='utf-8')
+    assert load_imu_calibration_config(bad_imu) == {}
+
+    non_mapping_camchain = tmp_path / 'non_mapping_camchain.yaml'
+    non_mapping_camchain.write_text('- 1\n- 2\n', encoding='utf-8')
+    assert load_camchain_calibration_config(non_mapping_camchain) == {}
+
+    no_cam = tmp_path / 'no_cam.yaml'
+    no_cam.write_text('imu0: {}\n', encoding='utf-8')
+    assert load_camchain_calibration_config(no_cam) == {}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from pathlib import Path
 from typing import Sequence
 
 import numpy as np
@@ -21,6 +22,49 @@ _PLOT_COLORS = (
     '#bcbd22',
     '#17becf',
 )
+
+_PLOT_DOWNLOAD_SCALE = 3
+_STATIC_IMAGE_SCALE = 3
+
+
+def _plotly_export_config(path: str, width: int, height: int) -> dict[str, object]:
+    return {
+        'displaylogo': False,
+        'responsive': True,
+        'toImageButtonOptions': {
+            'format': 'png',
+            'filename': Path(path).stem,
+            'width': width,
+            'height': height,
+            'scale': _PLOT_DOWNLOAD_SCALE,
+        },
+    }
+
+
+def _write_plot(
+    fig: go.Figure,
+    path: str,
+    *,
+    image_width: int=2400,
+    image_height: int=1800,
+) -> None:
+    if path.endswith('.html'):
+        fig.write_html(
+            path,
+            config=_plotly_export_config(path, width=image_width, height=image_height),
+        )
+    else:
+        try:
+            fig.write_image(
+                path,
+                width=image_width,
+                height=image_height,
+                scale=_STATIC_IMAGE_SCALE,
+            )
+        except ValueError as e:
+            print(f'Error saving static image using Plotly: {e}')
+            print('To save as PNG/JPG, please install kaleido: pip install kaleido')
+            print('Alternatively, use .html extension for interactive plot.')
 
 
 def save_trajectory_csv(traj: Sequence[TrajectoryPoint], path: str) -> None:
@@ -89,15 +133,7 @@ def save_trajectory_plot(
         template='plotly_white',
         dragmode='pan',
     )
-    if path.endswith('.html'):
-        fig.write_html(path)
-    else:
-        try:
-            fig.write_image(path, scale=2)
-        except ValueError as e:
-            print(f'Error saving static image using Plotly: {e}')
-            print('To save as PNG/JPG, please install kaleido: pip install kaleido')
-            print('Alternatively, use .html extension for interactive plot.')
+    _write_plot(fig, path, image_width=2400, image_height=1800)
 
 
 def save_tape_diagnostics_csv(diagnostics: TapeLineDiagnostics, path: str) -> None:
@@ -206,15 +242,7 @@ def save_tape_diagnostics_plot(diagnostics: TapeLineDiagnostics, path: str) -> N
         dragmode='pan',
         legend=dict(x=0.01, y=0.99),
     )
-    if path.endswith('.html'):
-        fig.write_html(path)
-    else:
-        try:
-            fig.write_image(path, scale=2)
-        except ValueError as e:
-            print(f'Error saving static image using Plotly: {e}')
-            print('To save as PNG/JPG, please install kaleido: pip install kaleido')
-            print('Alternatively, use .html extension for interactive plot.')
+    _write_plot(fig, path, image_width=2400, image_height=1800)
 
 
 def save_loop_debug_csv(loop_debug: LoopAveragingDebug, path: str) -> None:
@@ -380,12 +408,4 @@ def save_loop_debug_plot(loop_debug: LoopAveragingDebug, path: str) -> None:
         dragmode='pan',
         legend=dict(x=0.01, y=0.99),
     )
-    if path.endswith('.html'):
-        fig.write_html(path)
-    else:
-        try:
-            fig.write_image(path, scale=2)
-        except ValueError as e:
-            print(f'Error saving static image using Plotly: {e}')
-            print('To save as PNG/JPG, please install kaleido: pip install kaleido')
-            print('Alternatively, use .html extension for interactive plot.')
+    _write_plot(fig, path, image_width=3600, image_height=1400)
