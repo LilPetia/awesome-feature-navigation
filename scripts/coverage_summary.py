@@ -46,14 +46,14 @@ def build_summary(report_path: Path) -> str:
         "## Coverage",
         "",
         f"Covered lines: **{covered}/{total}**",
-        f"Total coverage: **{percent:.1f}%**",
+        f"Total coverage: **{percent:.2f}%**",
         "",
         "| Module | Covered lines | Coverage |",
         "| --- | ---: | ---: |",
     ]
 
     for module in modules[:10]:
-        lines.append(f"| `{module.name}` | {module.covered}/{module.total} | {module.percent:.1f}% |")
+        lines.append(f"| `{module.name}` | {module.covered}/{module.total} | {module.percent:.2f}% |")
 
     return "\n".join(lines) + "\n"
 
@@ -91,12 +91,12 @@ def write_badge(report_path: Path, badge_path: Path) -> None:
     badge = {
         "schemaVersion": 1,
         "label": "coverage",
-        "message": f"{percent:.1f}%",
+        "message": f"{percent:.2f}%",
         "color": badge_color(percent),
         "cacheSeconds": 300,
     }
     badge_path.write_text(dumps(badge, indent=2) + "\n", encoding="utf-8")
-    print(f"Wrote coverage badge to {badge_path}: {covered}/{total} lines, {percent:.1f}%")
+    print(f"Wrote coverage badge to {badge_path}: {covered}/{total} lines, {percent:.2f}%")
 
 
 def write_github_summary(summary: str) -> None:

@@ -17,11 +17,18 @@ from awesome_feature_navigation.cli import (
     _resolve_path,
 )
 from awesome_feature_navigation.imu_preintegration import IMUSample
-from awesome_feature_navigation.trajectory import TapeLineDiagnostics, TrajectoryEstimateResult, TrajectoryPoint
+from awesome_feature_navigation.trajectory import (
+    LoopAveragingDebug,
+    LoopLapDebug,
+    TapeLineDiagnostics,
+    TrajectoryEstimateResult,
+    TrajectoryPoint,
+)
 
 
 def test_parse_lap_bounds_supports_seconds_and_clock_notation() -> None:
     assert _parse_lap_bounds('11, 1:02, 2:03:04') == pytest.approx([11.0, 62.0, 7384.0])
+    assert _parse_lap_bounds(' , 5, , 0:10 ') == pytest.approx([5.0, 10.0])
 
 
 def test_cli_bool_absolute_seconds_and_relative_path_resolution(tmp_path: Path) -> None:
@@ -33,9 +40,11 @@ def test_cli_bool_absolute_seconds_and_relative_path_resolution(tmp_path: Path) 
     assert _cfg_bool(None, True) is True
     assert _cfg_bool('false', True) is False
     assert _cfg_bool('yes', False) is True
+    assert _cfg_bool(0, True) is False
     assert _looks_like_absolute_seconds(1_700_000_000.0) is True
     assert _looks_like_absolute_seconds(123.0) is False
     assert _resolve_path('data.csv', config_path) == sibling
+    assert _resolve_path('missing.csv', config_path) == Path('missing.csv')
     assert _resolve_path(str(sibling), None) == sibling
 
 
@@ -60,6 +69,8 @@ def test_normalize_time_base_handles_absolute_and_relative_timestamps() -> None:
 
     assert relative == pytest.approx([0.0, 1.0])
     assert synced is False
+    assert _normalize_time_base(None, imu, {}) == (None, imu, False)
+    assert _normalize_time_base([], imu, {}) == ([], imu, False)
 
 
 def test_merge_calibration_cfg_ignores_missing_path_value() -> None:
@@ -101,11 +112,34 @@ def test_main_wires_config_calibration_outputs_and_debug_saves(tmp_path: Path, m
         speed_mps=np.array([0.2], dtype=float),
         delta_yaw_imu=np.array([0.0], dtype=float),
     )
+    loop_debug = LoopAveragingDebug(
+        period_sec=1.0,
+        samples_per_lap=2,
+        laps=[
+            LoopLapDebug(
+                lap_index=0,
+                t0=0.0,
+                t1=1.0,
+                direction='forward',
+                raw_xy=np.zeros((2, 2), dtype=float),
+                aligned_xy=np.zeros((2, 2), dtype=float),
+                projected_xy=np.zeros((2, 2), dtype=float),
+                phase_shift=0,
+                scale=1.0,
+                alignment_rmse=0.0,
+                projection_rmse=0.0,
+                kept=True,
+            )
+        ],
+        canonical_xy=np.zeros((2, 2), dtype=float),
+        spline_control_xy=np.zeros((2, 2), dtype=float),
+        split_times=np.array([0.0, 1.0], dtype=float),
+    )
     result = TrajectoryEstimateResult(
         raw_traj=[TrajectoryPoint(0.0, 0.0, 0.0, 0.0)],
         smoothed_traj=[TrajectoryPoint(0.0, 0.0, 0.0, 0.0)],
         final_traj=[TrajectoryPoint(0.0, 0.0, 0.0, 0.0)],
-        loop_debug=None,
+        loop_debug=loop_debug,
         mode='tape_line',
         relative_scale=True,
         estimated_loop_period_sec=1.0,
@@ -138,6 +172,11 @@ def test_main_wires_config_calibration_outputs_and_debug_saves(tmp_path: Path, m
             'frames.csv',
             '--frame-time-scale',
             '1.0',
+            '--imu-calibration',
+            str(tmp_path / 'imu.yaml'),
+            '--camchain',
+            str(tmp_path / 'camchain.yaml'),
+            '--no-auto-config',
             '--lap-bounds',
             '0,1',
             '--save-loop-debug',
@@ -183,3 +222,4 @@ def test_main_wires_config_calibration_outputs_and_debug_saves(tmp_path: Path, m
     assert 'Time sync' in output
     assert str(out_prefix.with_suffix('.csv')) in saved
     assert str(Path(str(out_prefix) + '_diagnostics.html')) in saved
+    assert str(Path(str(out_prefix) + '_laps.html')) in saved

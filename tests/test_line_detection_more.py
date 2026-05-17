@@ -25,8 +25,10 @@ def test_line_geometry_helpers_handle_degenerate_and_windowed_inputs() -> None:
     assert np.isnan(_vector_to_angle(np.array([0.0, 0.0], dtype=float)))
     assert _fit_local_direction(vertical, fraction=0.2, min_points=3) == pytest.approx(0.0, abs=1e-6)
     assert np.isnan(_fit_local_direction(vertical[:1], fraction=0.2, min_points=3))
+    assert np.isnan(_fit_local_direction(vertical[:2], fraction=0.05, min_points=0))
     assert np.isnan(_fit_local_direction(np.zeros((3, 2), dtype=float), fraction=1.0, min_points=1))
     assert _measure_bottom_x(vertical, fraction=0.5, min_points=4, statistic='mean') == pytest.approx(10.0)
+    assert _measure_bottom_x(vertical, fraction=0.5, min_points=4, statistic='median') == pytest.approx(10.0)
     assert _measure_bottom_x(vertical, fraction=0.0, min_points=4, statistic='median') == pytest.approx(10.0)
     assert _measure_bottom_x(vertical[:0], fraction=0.5, min_points=4, statistic='median') != _measure_bottom_x(vertical[:0], fraction=0.5, min_points=4, statistic='median')
 
@@ -104,6 +106,9 @@ def test_line_detector_processes_blue_line_and_reuses_previous_centerline() -> N
     assert obs.bottom_x == pytest.approx(60.0, abs=2.0)
     assert np.isfinite(obs.angle_rad)
     assert np.count_nonzero(obs.centerline_mask) > 0
+
+    pca = detector.process(frame, {'target_color': 'blue'})
+    assert np.isfinite(pca.angle_rad)
 
     empty = np.zeros_like(frame)
     fallback = detector.process(empty, {'target_color': 'blue'})

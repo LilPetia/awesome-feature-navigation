@@ -40,7 +40,7 @@ jobs:
         run: uv run mypy
 
       - name: Run Pytest
-        run: uv run pytest --cov=awesome_feature_navigation --cov-report=term-missing --cov-report=xml:coverage.xml
+        run: uv run pytest --cov=awesome_feature_navigation --cov-report=term-missing --cov-report=xml:coverage.xml --cov-fail-under=95
 
       - name: Summarize coverage
         if: matrix.python-version == '3.12'

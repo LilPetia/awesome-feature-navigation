@@ -5,6 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import awesome_feature_navigation.imu_preintegration as imu_preintegration
 from awesome_feature_navigation.imu_io import (
     _apply_axis_map,
     _parse_axis_spec,
@@ -205,6 +206,110 @@ def test_preintegration_handles_short_negative_and_accumulated_sequences() -> No
 
     assert first.delta_t == pytest.approx(1.0)
     assert second.delta_t == pytest.approx(2.0)
+
+
+def test_gtsam_preintegration_path_with_fake_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeParams:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def setAccelerometerCovariance(self, value: np.ndarray) -> None:
+            self.calls.append('accel')
+
+        def setGyroscopeCovariance(self, value: np.ndarray) -> None:
+            self.calls.append('gyro')
+
+        def setIntegrationCovariance(self, value: np.ndarray) -> None:
+            self.calls.append('integration')
+
+        def setBiasAccCovariance(self, value: np.ndarray) -> None:
+            self.calls.append('bias_acc')
+
+        def setBiasOmegaCovariance(self, value: np.ndarray) -> None:
+            self.calls.append('bias_gyro')
+
+        def setBiasAccOmegaInt(self, value: np.ndarray) -> None:
+            self.calls.append('bias_cross')
+
+    class FakePreintegrationParams:
+        @staticmethod
+        def MakeSharedU(gravity: float) -> FakeParams:
+            params = FakeParams()
+            params.calls.append(f'gravity={gravity}')
+            return params
+
+    class FakeBias:
+        pass
+
+    class FakeImuBias:
+        @staticmethod
+        def ConstantBias() -> FakeBias:
+            return FakeBias()
+
+    class FakeRot3:
+        def __init__(self, yaw: float=0.25) -> None:
+            self.yaw = yaw
+
+        def rpy(self) -> tuple[float, float, float]:
+            return (0.0, 0.0, self.yaw)
+
+    class FakePIM:
+        def __init__(self, params: FakeParams, bias: FakeBias) -> None:
+            self.params = params
+            self.bias = bias
+            self.measurements: list[tuple[np.ndarray, np.ndarray, float]] = []
+
+        def integrateMeasurement(self, accel: np.ndarray, omega: np.ndarray, dt: float) -> None:
+            self.measurements.append((accel, omega, dt))
+
+        def deltaRij(self) -> FakeRot3:
+            return FakeRot3(0.25)
+
+        def deltaTij(self) -> float:
+            return float(sum(dt for _, _, dt in self.measurements))
+
+        def deltaVij(self) -> np.ndarray:
+            return np.array([1.0, 2.0, 3.0], dtype=float)
+
+        def deltaPij(self) -> np.ndarray:
+            return np.array([0.1, 0.2, 0.3], dtype=float)
+
+        def preintMeasCov(self) -> np.ndarray:
+            return np.eye(9)
+
+    class FakeGtsam:
+        PreintegrationParams = FakePreintegrationParams
+        imuBias = FakeImuBias
+        PreintegratedImuMeasurements = FakePIM
+        Rot3 = FakeRot3
+
+    monkeypatch.setattr(imu_preintegration, '_HAS_GTSAM', True)
+    monkeypatch.setattr(imu_preintegration, 'gtsam', FakeGtsam)
+
+    params = build_default_params(gravity_mps2=9.7)
+    assert isinstance(params, FakeParams)
+    assert 'gravity=9.7' in params.calls
+    assert 'bias_cross' in params.calls
+
+    wrapper = IMUPreintegrationWrapper(params=params)
+    wrapper.reset(bias=FakeBias())
+    short = wrapper.preintegrate([_sample(0.0)])
+    result = wrapper.preintegrate(
+        [
+            _sample(0.0, accel=[1.0, 0.0, 0.0], omega=[0.1, 0.0, 0.0]),
+            _sample(0.5, accel=[0.0, 1.0, 0.0], omega=[0.0, 0.2, 0.0]),
+            _sample(0.25, accel=[0.0, 0.0, 1.0], omega=[0.0, 0.0, 0.3]),
+            _sample(1.0, accel=[0.0, 0.0, 1.0], omega=[0.0, 0.0, 0.3]),
+        ]
+    )
+
+    assert isinstance(short.delta_R, FakeRot3)
+    assert result.delta_t == pytest.approx(1.25)
+    assert result.delta_yaw == pytest.approx(0.25)
+    np.testing.assert_allclose(result.delta_v, [1.0, 2.0, 3.0])
+    np.testing.assert_allclose(result.delta_p, [0.1, 0.2, 0.3])
+    np.testing.assert_allclose(result.covariance, np.eye(9))
+    assert rot3_yaw(FakeRot3(0.4)) == pytest.approx(0.4)
 
 
 def test_minimal_rot3_and_so3_helpers() -> None:

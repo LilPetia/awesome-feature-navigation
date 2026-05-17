@@ -14,7 +14,7 @@ type:
 	uv run mypy
 
 test:
-	uv run pytest --cov=awesome_feature_navigation --cov-report=term-missing --cov-fail-under=92
+	uv run pytest --cov=awesome_feature_navigation --cov-report=term-missing --cov-fail-under=95
 
 fix:
 	uv run ruff check . --fix

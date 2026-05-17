@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, cast
+
 import numpy as np
 import pytest
 
@@ -52,6 +54,11 @@ def _record(t: float, angle: float=0.0, bottom_x: float=50.0, confidence: float=
 def test_config_geometry_alignment_and_resampling_helpers() -> None:
     square = np.array([[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]], dtype=float)
     shifted = square + np.array([2.0, -1.0])
+    reflected = square * np.array([-1.0, 1.0])
+
+    class FakeCapture:
+        def get(self, prop: int) -> float:
+            return 2500.0
 
     assert tr._clamp(10.0, 0.0, 1.0) == 1.0
     assert tr._cfg_float({'value': 'bad'}, ['missing', 'value'], 2.0) == 2.0
@@ -59,13 +66,18 @@ def test_config_geometry_alignment_and_resampling_helpers() -> None:
     assert tr._cfg_bool_any({'flag': 1}, ['flag']) is True
     assert tr._build_imu_preintegration_params({'imu_gravity_mps2': 9.7}) is None
     assert tr._blend_angles(float('nan'), 0.5, 0.5) == pytest.approx(0.5)
+    assert tr._blend_angles(0.5, float('nan'), 0.5) == pytest.approx(0.5)
+    assert tr._blend_angles(0.0, np.pi, 0.5) == pytest.approx(0.0)
+    assert tr._frame_time_at(cast(Any, FakeCapture()), 99, [1.0]) == pytest.approx(2.5)
     np.testing.assert_allclose(tr._rigid_align_points(shifted, square), square, atol=1e-6)
+    assert tr._rigid_align_points(reflected, square).shape == square.shape
     aligned, scale = tr._similarity_align_points(square * 2.0, square)
     assert scale == pytest.approx(0.5)
     np.testing.assert_allclose(aligned, square, atol=1e-6)
     assert tr._lap_rmse(square, square) == pytest.approx(0.0)
     assert tr._choose_loop_anchor(square, 'bottom_left') == 0
     assert tr._robust_keep_mask([0.1, 0.11, 10.0], min_keep=2, sigma=1.0).tolist() == [True, True, False]
+    assert tr._robust_keep_mask([0.0, 10.0, 100.0], min_keep=2, sigma=0.1).tolist() == [True, True, False]
     assert tr._anchor_scores(np.zeros((0, 2)), 'bottom_left').shape == (0,)
     assert tr._resample_polyline_by_arclength(square[:1], 3).shape == (3, 2)
     assert tr._resample_closed_polyline_by_arclength(square, 8).shape == (8, 2)
@@ -129,6 +141,7 @@ def test_closed_loop_spline_projection_and_representative_selection() -> None:
     assert rmse < 0.2
     assert loop_traj[-1].t == pytest.approx(2.0)
     assert tr._segments_strictly_intersect(np.array([0, 0]), np.array([1, 1]), np.array([0, 1]), np.array([1, 0])) is True
+    assert tr._count_self_intersections(np.array([[0, 0], [1, 0], [0, 1]], dtype=float)) == 0
     assert tr._count_self_intersections(np.array([[0, 0], [1, 1], [0, 1], [1, 0]], dtype=float)) == 1
 
 
@@ -143,6 +156,7 @@ def test_tape_smoothing_confidence_and_motion_terms() -> None:
     first = smoother.update(_tape_observation(angle=0.1, bottom_x=52.0))
     second = smoother.update(_tape_observation(angle=0.2, bottom_x=54.0))
     confidence = tr._line_observation_confidence(_tape_observation(), {'line_confidence_min_points': 8})
+    low_confidence = tr._line_observation_confidence(_tape_observation(points=3), {'line_confidence_min_points': 8})
     terms = tr._compute_tape_motion_terms(
         records,
         angles=np.array([0.0, 0.2, 0.0], dtype=float),
@@ -155,10 +169,15 @@ def test_tape_smoothing_confidence_and_motion_terms() -> None:
     assert first.bottom_x == pytest.approx(52.0)
     assert second.bottom_x > 52.0
     assert confidence > 0.5
+    assert low_confidence == pytest.approx(0.0)
+    np.testing.assert_allclose(tr._centered_weighted_average(np.zeros(0), np.zeros(0), 3), np.zeros(0))
     assert tr._centered_weighted_average(np.array([1.0, 3.0]), np.array([1.0, 1.0]), 3).tolist() == pytest.approx([2.0, 2.0])
     assert np.isfinite(tr._centered_weighted_angle_average(np.array([0.0, np.pi / 2.0]), np.ones(2), 3)).all()
+    assert tr._median_dt(np.array([0.0])) == pytest.approx(0.0)
+    assert tr._median_dt(np.array([0.0, 0.0])) == pytest.approx(0.0)
     assert tr._median_dt(np.array([0.0, 0.1, 0.2])) == pytest.approx(0.1)
     assert tr._make_odd_window(4) == 5
+    assert tr._resolve_smoothing_window_frames(np.array([0.0]), {}) == 1
     assert tr._resolve_smoothing_window_frames(np.array([0.0, 0.5, 1.0]), {'offline_line_smoothing_frames': 2}) == 3
     assert tr._adaptive_confidence_threshold(np.array([0.0, 0.0]), {'offline_line_min_confidence': 0.2}) == pytest.approx(0.2)
     assert len(traj) == 3

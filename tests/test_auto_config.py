@@ -218,6 +218,28 @@ def test_build_ranges_handles_sparse_red_groups_and_narrow_hues() -> None:
     assert narrow_range[3] - narrow_range[0] >= 6
 
 
+def test_build_ranges_expands_narrow_hue_when_percentiles_are_too_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    pixels = np.tile(np.array([[100, 180, 200]], dtype=np.uint8), (60, 1))
+    calls = 0
+
+    def fake_percentile(values: np.ndarray, percentile: float) -> float:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return 180.0
+        if calls == 2:
+            return 200.0
+        if calls == 3:
+            return 100.0
+        return 90.0
+
+    monkeypatch.setattr(auto_config.np, 'percentile', fake_percentile)
+
+    hue_range = _build_ranges_from_pixels('blue', pixels)[0]
+
+    assert hue_range[3] - hue_range[0] == 6
+
+
 def test_collect_line_hsv_pixels_rejects_low_scores_and_shape_mismatches(monkeypatch: pytest.MonkeyPatch) -> None:
     frame = _frame((255, 0, 0))
     valid_mask = np.zeros((20, 30), dtype=np.uint8)
@@ -294,6 +316,21 @@ def test_infer_line_config_selects_best_candidate(monkeypatch: pytest.MonkeyPatc
     assert line_cfg is not None
     assert line_cfg.target_color == 'green'
     assert line_cfg.sample_count == 2
+
+
+def test_infer_line_config_accepts_single_candidate_string(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(auto_config, '_sample_frames', lambda video_path, cfg: [_frame(), _frame()])
+    monkeypatch.setattr(auto_config, '_score_color', lambda frames, color, cfg: (2.0, 1.0))
+    monkeypatch.setattr(
+        auto_config,
+        '_collect_line_hsv_pixels',
+        lambda frames, color, cfg: np.tile(np.array([[110, 180, 200]], dtype=np.uint8), (60, 1)),
+    )
+
+    line_cfg = infer_line_config_from_video('video.mp4', {'auto_config_color_candidates': 'blue'})
+
+    assert line_cfg is not None
+    assert line_cfg.target_color == 'blue'
 
 
 def test_infer_line_config_returns_none_for_empty_or_weak_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
