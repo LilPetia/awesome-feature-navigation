@@ -207,6 +207,13 @@ loop_fourier_harmonics: auto
 loop_min_kept_laps: 2
 loop_max_alignment_rmse_ratio: 0.80
 loop_max_projection_rmse_ratio: 0.70
+manual_lap_bounds_sec: [11.0, 53.0, 104.0, 159.48]
+manual_lap_directions: [forward, forward, reverse]
+loop_average_direction: any
+loop_normalize_reverse_laps: true
+loop_start_anchor: manual_start
+trajectory_output_flip_x: true
+max_frames: 0
 ```
 
 ## 7. Сбор и объединение конфигурации
@@ -249,7 +256,14 @@ loop_fourier_harmonics: auto
 loop_min_kept_laps: 2
 loop_max_alignment_rmse_ratio: 0.80
 loop_max_projection_rmse_ratio: 0.70
+manual_lap_bounds_sec: [11.0, 53.0, 104.0, 159.48]
+manual_lap_directions: [forward, forward, reverse]
+loop_average_direction: any
+loop_normalize_reverse_laps: true
+loop_start_anchor: manual_start
+trajectory_output_flip_x: true
 line_angle_mode: bottom_segment
+max_frames: 0
 ```
 
 Относительные пути из YAML резолвятся относительно папки самого конфига.
@@ -979,10 +993,23 @@ loop_fourier_harmonics: auto
 
 Траектория режется на круги одним из способов:
 
-1. Anchor-based boundaries - поиск повторяющегося anchor, например `bottom_left`.
-2. Periodic boundaries - нарезка по известному или оцененному периоду.
+1. Manual boundaries - явные `manual_lap_bounds_sec` из конфига.
+2. Anchor-based boundaries - поиск повторяющегося anchor, например `bottom_left`.
+3. Periodic boundaries - нарезка по известному или оцененному периоду.
 
 Каждый круг ресэмплится по длине дуги до `loop_samples`.
+
+Для текущего `Right_cam.mp4` в конфиге явно задано, что первые два интервала являются прямыми кругами, а третий проезд после разворота является обратным:
+
+```yaml
+manual_lap_bounds_sec: [11.0, 53.0, 104.0, 159.48]
+manual_lap_directions: [forward, forward, reverse]
+loop_average_direction: any
+loop_normalize_reverse_laps: true
+loop_start_anchor: manual_start
+```
+
+Это означает, что `raw_traj` и `smoothed_traj` содержат весь проезд, включая обратное направление. Для `final_traj` reverse-круг разворачивается по порядку точек и участвует в representative lap вместе с forward-кругами, не ломая общее направление канонической петли.
 
 ### 15.4 Выравнивание кругов
 

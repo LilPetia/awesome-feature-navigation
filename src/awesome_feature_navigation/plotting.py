@@ -236,6 +236,7 @@ def save_loop_debug_csv(loop_debug: LoopAveragingDebug, path: str) -> None:
             'projection_rmse',
             't0',
             't1',
+            'direction',
         ])
         denom = max(1, loop_debug.samples_per_lap)
         for lap in loop_debug.laps:
@@ -256,6 +257,7 @@ def save_loop_debug_csv(loop_debug: LoopAveragingDebug, path: str) -> None:
                     f'{lap.projection_rmse:.6f}',
                     f'{lap.t0:.6f}',
                     f'{lap.t1:.6f}',
+                    lap.direction,
                 ])
 
 
@@ -283,7 +285,8 @@ def save_loop_debug_plot(loop_debug: LoopAveragingDebug, path: str) -> None:
             f'shift={lap.phase_shift}<br>'
             f'scale={lap.scale:.3f}<br>'
             f'align_rmse={lap.alignment_rmse:.4f}<br>'
-            f'proj_rmse={lap.projection_rmse:.4f}'
+            f'proj_rmse={lap.projection_rmse:.4f}<br>'
+            f'direction={lap.direction}'
         )
         fig.add_trace(
             go.Scatter(

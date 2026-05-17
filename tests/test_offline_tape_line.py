@@ -6,9 +6,11 @@ from awesome_feature_navigation.trajectory import (
     TapeFrameObservation,
     TrajectoryPoint,
     _adaptive_confidence_threshold,
+    _apply_output_transform_to_trajectory,
     _build_offline_tape_line_estimate,
     _build_offline_tape_line_trajectory,
     _canonicalize_periodic_trajectory,
+    _distribute_loop_closure_error,
     _line_observation_confidence,
     _resolve_smoothing_window_frames,
 )
@@ -155,3 +157,118 @@ def test_loop_canonicalization_rejects_poorly_aligned_laps() -> None:
 
     assert loop_debug is None
     assert len(final_traj) == len(traj)
+
+
+def test_loop_canonicalization_can_select_forward_laps_only() -> None:
+    traj = []
+    samples_per_lap = 80
+    for lap_idx in range(3):
+        for sample_idx in range(samples_per_lap):
+            phase = 2.0 * np.pi * sample_idx / samples_per_lap
+            if lap_idx == 2:
+                phase = -phase
+            t = float(lap_idx + sample_idx / samples_per_lap)
+            traj.append(
+                TrajectoryPoint(
+                    t=t,
+                    x=float(np.cos(phase)),
+                    y=float(np.sin(phase)),
+                    yaw=float(phase),
+                )
+            )
+
+    final_traj, loop_debug = _canonicalize_periodic_trajectory(
+        traj,
+        {
+            'loop_period_sec': 1.0,
+            'loop_samples': 64,
+            'loop_similarity_align': False,
+            'loop_strategy': 'representative_lap',
+            'manual_lap_bounds_sec': [0.0, 1.0, 2.0, 3.0],
+            'manual_lap_directions': ['forward', 'forward', 'reverse'],
+            'loop_average_direction': 'forward',
+            'loop_max_alignment_rmse_ratio': 10.0,
+            'loop_max_projection_rmse_ratio': 10.0,
+        },
+    )
+
+    assert loop_debug is not None
+    assert [lap.lap_index for lap in loop_debug.laps] == [0, 1]
+    assert [lap.direction for lap in loop_debug.laps] == ['forward', 'forward']
+    assert len(final_traj) > 0
+
+
+def test_loop_canonicalization_can_include_reversed_laps() -> None:
+    traj = []
+    samples_per_lap = 80
+    for lap_idx in range(3):
+        for sample_idx in range(samples_per_lap):
+            phase = 2.0 * np.pi * sample_idx / samples_per_lap
+            if lap_idx == 2:
+                phase = -phase
+            t = float(lap_idx + sample_idx / samples_per_lap)
+            traj.append(
+                TrajectoryPoint(
+                    t=t,
+                    x=float(np.cos(phase)),
+                    y=float(np.sin(phase)),
+                    yaw=float(phase),
+                )
+            )
+
+    final_traj, loop_debug = _canonicalize_periodic_trajectory(
+        traj,
+        {
+            'loop_period_sec': 1.0,
+            'loop_samples': 64,
+            'loop_similarity_align': False,
+            'loop_strategy': 'representative_lap',
+            'manual_lap_bounds_sec': [0.0, 1.0, 2.0, 3.0],
+            'manual_lap_directions': ['forward', 'forward', 'reverse'],
+            'loop_average_direction': 'any',
+            'loop_normalize_reverse_laps': True,
+            'loop_max_alignment_rmse_ratio': 10.0,
+            'loop_max_projection_rmse_ratio': 10.0,
+        },
+    )
+
+    assert loop_debug is not None
+    assert [lap.lap_index for lap in loop_debug.laps] == [0, 1, 2]
+    assert [lap.direction for lap in loop_debug.laps] == ['forward', 'forward', 'reverse']
+    assert loop_debug.laps[2].raw_xy[0, 1] > 0.0
+    assert len(final_traj) > 0
+
+
+def test_distribute_loop_closure_error_removes_single_closing_jump() -> None:
+    points = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [1.0, 1.0],
+            [0.5, 1.0],
+        ],
+        dtype=float,
+    )
+
+    closed = _distribute_loop_closure_error(points)
+
+    assert closed[0].tolist() == pytest.approx([0.0, 0.0])
+    assert closed[-1].tolist() == pytest.approx([0.0, 0.0])
+
+
+def test_output_transform_can_flip_trajectory_x_axis() -> None:
+    traj = [
+        TrajectoryPoint(t=0.0, x=0.0, y=0.0, yaw=0.0),
+        TrajectoryPoint(t=1.0, x=1.5, y=2.0, yaw=0.0),
+    ]
+
+    transformed = _apply_output_transform_to_trajectory(
+        traj,
+        {'trajectory_output_flip_x': True},
+    )
+
+    assert transformed[0].x == pytest.approx(0.0)
+    assert transformed[0].y == pytest.approx(0.0)
+    assert transformed[1].x == pytest.approx(-1.5)
+    assert transformed[1].y == pytest.approx(2.0)
+    assert abs(transformed[1].yaw) == pytest.approx(np.pi)

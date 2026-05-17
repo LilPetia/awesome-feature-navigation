@@ -25,6 +25,19 @@ loop_fourier_harmonics: auto
 loop_min_kept_laps: 2
 loop_max_alignment_rmse_ratio: 0.80
 loop_max_projection_rmse_ratio: 0.70
+manual_lap_bounds_sec:
+  - 11.0
+  - 53.0
+  - 104.0
+  - 159.48
+manual_lap_directions:
+  - forward
+  - forward
+  - reverse
+loop_average_direction: any
+loop_normalize_reverse_laps: true
+loop_start_anchor: manual_start
+trajectory_output_flip_x: true
 
 target_color: blue
 auto_color_tune: true

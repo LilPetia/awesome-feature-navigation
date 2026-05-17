@@ -109,7 +109,7 @@ uv run afn-run \
   --out outputs/manual/right
 ```
 
-Альтернатива: жёстко обрезать видео по кадрам через отдельный конфиг с `max_frames`. Готовый пример `configs/right_camera_2laps.yaml` (`max_frames: 3120`, ≈ 1:44 при 30 fps) исключает всё после третьего круга:
+Для `Right_cam.mp4` эти границы уже внесены в основной `configs/right_camera.yaml`: первые два круга размечены как `forward`, третий проезд после разворота - как `reverse`. При построении representative lap reverse-круг разворачивается по порядку точек через `loop_normalize_reverse_laps: true` и учитывается вместе с forward-кругами. `loop_start_anchor: manual_start` оставляет старт канонического круга около ручной границы, а не переносит его в автоматический `bottom_left` anchor. Полный путь с исходным обратным проездом остается в `_smoothed.csv/html` при `--save-loop-debug`. Отдельный `configs/right_camera_2laps.yaml` оставлен как вариант, который жестко обрезает запись после второго круга через `max_frames: 3120`:
 
 ```bash
 uv run afn-run \

@@ -24,6 +24,7 @@ class LoopLapDebug:
     lap_index: int
     t0: float
     t1: float
+    direction: str
     raw_xy: np.ndarray
     aligned_xy: np.ndarray
     projected_xy: np.ndarray
@@ -113,6 +114,19 @@ def _cfg_float(cfg: Dict, keys: Sequence[str], default: float) -> float:
             except (TypeError, ValueError):
                 continue
     return float(default)
+
+
+def _cfg_bool_any(cfg: Dict, keys: Sequence[str], default: bool=False) -> bool:
+    for key in keys:
+        if key not in cfg or cfg[key] is None:
+            continue
+        value = cfg[key]
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() not in {'0', 'false', 'no', 'off'}
+        return bool(value)
+    return default
 
 
 def _build_imu_preintegration_params(cfg: Dict) -> object | None:
@@ -539,6 +553,52 @@ def _extract_periodic_laps(
     return (laps, np.asarray(split_times, dtype=float))
 
 
+def _normalize_lap_direction(value: object) -> str:
+    raw = str(value or 'forward').strip().lower()
+    if raw in {'any', 'all', 'both', '*'}:
+        return 'any'
+    if raw in {'reverse', 'reversed', 'backward', 'backwards', 'opposite', '-1'}:
+        return 'reverse'
+    return 'forward'
+
+
+def _resolve_manual_lap_directions(cfg: Dict, lap_count: int) -> List[str]:
+    default_direction = _normalize_lap_direction(cfg.get('manual_lap_direction', 'forward'))
+    if default_direction == 'any':
+        default_direction = 'forward'
+    raw_directions = cfg.get('manual_lap_directions')
+    directions: List[str] = []
+    if isinstance(raw_directions, Sequence) and not isinstance(raw_directions, (str, bytes)):
+        directions = [_normalize_lap_direction(item) for item in raw_directions]
+    directions = [direction if direction != 'any' else default_direction for direction in directions]
+    if len(directions) < lap_count:
+        directions.extend([default_direction] * (lap_count - len(directions)))
+    return directions[:lap_count]
+
+
+def _resolve_loop_start_anchor(cfg: Dict) -> str:
+    raw_anchor = str(cfg.get('loop_start_anchor', 'bottom_left') or 'bottom_left').strip().lower()
+    if raw_anchor in {'none', 'manual', 'manual_start', 'lap_start', 'boundary'}:
+        return ''
+    return raw_anchor
+
+
+def _normalize_laps_for_common_direction(
+    laps: Sequence[tuple[int, float, float, np.ndarray]],
+    directions: Sequence[str],
+    cfg: Dict,
+) -> List[tuple[int, float, float, np.ndarray]]:
+    if not _cfg_bool_any(cfg, ['loop_normalize_reverse_laps'], default=True):
+        return list(laps)
+    normalized: List[tuple[int, float, float, np.ndarray]] = []
+    for (lap_index, t0, t1, raw_xy), direction in zip(laps, directions):
+        if direction == 'reverse':
+            normalized.append((lap_index, t0, t1, np.asarray(raw_xy, dtype=float)[::-1].copy()))
+        else:
+            normalized.append((lap_index, t0, t1, raw_xy))
+    return normalized
+
+
 def _fourier_smooth_closed_path(points_xy: np.ndarray, harmonics: int) -> np.ndarray:
     loop_xy = np.asarray(points_xy, dtype=float)
     if harmonics <= 0 or loop_xy.shape[0] == 0:
@@ -551,6 +611,17 @@ def _fourier_smooth_closed_path(points_xy: np.ndarray, harmonics: int) -> np.nda
     coeffs[~mask] = 0.0
     smoothed = np.fft.ifft(coeffs)
     return np.column_stack((smoothed.real, smoothed.imag))
+
+
+def _distribute_loop_closure_error(points_xy: np.ndarray) -> np.ndarray:
+    pts = np.asarray(points_xy, dtype=float)
+    if pts.shape[0] < 2:
+        return pts.copy()
+    error = pts[-1] - pts[0]
+    if float(np.linalg.norm(error)) < 1e-12:
+        return pts.copy()
+    phases = np.linspace(0.0, 1.0, pts.shape[0], dtype=float).reshape(-1, 1)
+    return pts - phases * error
 
 
 def _sample_closed_catmull_rom(control_xy: np.ndarray, sample_count: int) -> np.ndarray:
@@ -684,6 +755,7 @@ def _build_representative_lap_loop(
             anchor_idx = _choose_loop_anchor(loop_body, anchor)
             if anchor_idx:
                 loop_body = np.roll(loop_body, -anchor_idx, axis=0)
+        loop_body = _distribute_loop_closure_error(loop_body)
         smoothed_body = _fourier_smooth_closed_path(loop_body, harmonics=harmonics)
         closure = float(np.linalg.norm(smoothed_body[0] - smoothed_body[-1]))
         self_intersections = _count_self_intersections(smoothed_body)
@@ -763,7 +835,7 @@ def _canonicalize_periodic_trajectory(
     if statistic not in {'mean', 'median'}:
         statistic = 'median'
     loop_strategy = str(cfg.get('loop_strategy', 'auto') or 'auto').strip().lower()
-    anchor = str(cfg.get('loop_start_anchor', 'bottom_left') or 'bottom_left').strip()
+    anchor = _resolve_loop_start_anchor(cfg)
     manual_bounds_raw = cfg.get('manual_lap_bounds_sec')
     manual_bounds: List[float] = []
     if manual_bounds_raw is not None:
@@ -777,6 +849,7 @@ def _canonicalize_periodic_trajectory(
             boundaries_sec=manual_bounds,
             samples_per_lap=samples_per_lap,
         )
+        lap_directions = _resolve_manual_lap_directions(cfg, len(laps))
     else:
         laps, split_times = _extract_anchor_laps(
             traj,
@@ -793,8 +866,25 @@ def _canonicalize_periodic_trajectory(
                 samples_per_lap=samples_per_lap,
                 min_fraction=min_fraction,
             )
+        lap_directions = ['forward'] * len(laps)
+    average_direction = _normalize_lap_direction(cfg.get('loop_average_direction', 'any'))
+    if average_direction != 'any':
+        selected = [
+            (lap, direction)
+            for lap, direction in zip(laps, lap_directions)
+            if direction == average_direction
+        ]
+        if len(selected) < 2:
+            return (list(traj), None)
+        laps = [lap for lap, _ in selected]
+        lap_directions = [direction for _, direction in selected]
+        split_times = np.asarray(
+            [lap_t0 for _, lap_t0, _, _ in laps] + [laps[-1][2]],
+            dtype=float,
+        )
     if len(laps) < 2:
         return (list(traj), None)
+    laps = _normalize_laps_for_common_direction(laps, lap_directions, cfg)
     lap_period = float(np.median([lap_t1 - lap_t0 for _, lap_t0, lap_t1, _ in laps]))
 
     template_xy = _center_points(laps[0][3])
@@ -954,6 +1044,7 @@ def _canonicalize_periodic_trajectory(
                 lap_index=lap_index,
                 t0=t0,
                 t1=t1,
+                direction=direction,
                 raw_xy=raw_xy,
                 aligned_xy=aligned_xy,
                 projected_xy=projected_xy,
@@ -963,7 +1054,7 @@ def _canonicalize_periodic_trajectory(
                 projection_rmse=projection_rmse,
                 kept=bool(keep),
             )
-            for (lap_index, t0, t1, raw_xy), aligned_xy, projected_xy, phase_shift, scale, rmse, projection_rmse, keep in zip(
+            for (lap_index, t0, t1, raw_xy), aligned_xy, projected_xy, phase_shift, scale, rmse, projection_rmse, keep, direction in zip(
                 laps,
                 final_aligned_laps,
                 final_projected_laps,
@@ -972,6 +1063,7 @@ def _canonicalize_periodic_trajectory(
                 final_rmses,
                 final_projection_rmses,
                 keep_mask,
+                lap_directions,
             )
         ],
         canonical_xy=loop_xy,
@@ -1395,6 +1487,122 @@ def _trajectory_from_xy(
         TrajectoryPoint(t=float(t), x=float(pt[0]), y=float(pt[1]), yaw=float(yi))
         for t, pt, yi in zip(times, xy, yaw)
     ]
+
+
+def _output_transform_params(cfg: Dict) -> tuple[float, float, float]:
+    scale_x = -1.0 if _cfg_bool_any(cfg, ['trajectory_output_flip_x', 'output_flip_x']) else 1.0
+    scale_y = -1.0 if _cfg_bool_any(cfg, ['trajectory_output_flip_y', 'output_flip_y']) else 1.0
+    rotation_rad = np.deg2rad(
+        _cfg_float(cfg, ['trajectory_output_rotation_deg', 'output_rotation_deg'], 0.0)
+    )
+    return (scale_x, scale_y, float(rotation_rad))
+
+
+def _output_transform_is_identity(cfg: Dict) -> bool:
+    scale_x, scale_y, rotation_rad = _output_transform_params(cfg)
+    return scale_x == 1.0 and scale_y == 1.0 and abs(rotation_rad) < 1e-12
+
+
+def _transform_xy_array(points_xy: np.ndarray, cfg: Dict) -> np.ndarray:
+    pts = np.asarray(points_xy, dtype=float)
+    if pts.size == 0:
+        return pts.copy()
+    scale_x, scale_y, rotation_rad = _output_transform_params(cfg)
+    scaled = pts.copy()
+    scaled[..., 0] *= scale_x
+    scaled[..., 1] *= scale_y
+    if abs(rotation_rad) < 1e-12:
+        return scaled
+    c = float(np.cos(rotation_rad))
+    s = float(np.sin(rotation_rad))
+    x = scaled[..., 0].copy()
+    y = scaled[..., 1].copy()
+    scaled[..., 0] = c * x - s * y
+    scaled[..., 1] = s * x + c * y
+    return scaled
+
+
+def _transform_yaw(yaw: float, cfg: Dict) -> float:
+    if not np.isfinite(yaw):
+        return float(yaw)
+    scale_x, scale_y, rotation_rad = _output_transform_params(cfg)
+    vx = scale_x * float(np.cos(yaw))
+    vy = scale_y * float(np.sin(yaw))
+    if abs(rotation_rad) >= 1e-12:
+        c = float(np.cos(rotation_rad))
+        s = float(np.sin(rotation_rad))
+        vx, vy = (c * vx - s * vy, s * vx + c * vy)
+    return float(np.arctan2(vy, vx))
+
+
+def _apply_output_transform_to_trajectory(
+    traj: Sequence[TrajectoryPoint],
+    cfg: Dict,
+) -> List[TrajectoryPoint]:
+    if _output_transform_is_identity(cfg):
+        return list(traj)
+    xy = np.asarray([[point.x, point.y] for point in traj], dtype=float)
+    transformed_xy = _transform_xy_array(xy, cfg)
+    return [
+        TrajectoryPoint(
+            t=float(point.t),
+            x=float(transformed_xy[idx, 0]),
+            y=float(transformed_xy[idx, 1]),
+            yaw=_transform_yaw(float(point.yaw), cfg),
+        )
+        for idx, point in enumerate(traj)
+    ]
+
+
+def _apply_output_transform_to_loop_debug(
+    loop_debug: Optional[LoopAveragingDebug],
+    cfg: Dict,
+) -> Optional[LoopAveragingDebug]:
+    if loop_debug is None or _output_transform_is_identity(cfg):
+        return loop_debug
+    return LoopAveragingDebug(
+        period_sec=loop_debug.period_sec,
+        samples_per_lap=loop_debug.samples_per_lap,
+        laps=[
+            LoopLapDebug(
+                lap_index=lap.lap_index,
+                t0=lap.t0,
+                t1=lap.t1,
+                direction=lap.direction,
+                raw_xy=_transform_xy_array(lap.raw_xy, cfg),
+                aligned_xy=_transform_xy_array(lap.aligned_xy, cfg),
+                projected_xy=_transform_xy_array(lap.projected_xy, cfg),
+                phase_shift=lap.phase_shift,
+                scale=lap.scale,
+                alignment_rmse=lap.alignment_rmse,
+                projection_rmse=lap.projection_rmse,
+                kept=lap.kept,
+            )
+            for lap in loop_debug.laps
+        ],
+        canonical_xy=_transform_xy_array(loop_debug.canonical_xy, cfg),
+        spline_control_xy=_transform_xy_array(loop_debug.spline_control_xy, cfg),
+        split_times=np.asarray(loop_debug.split_times, dtype=float).copy(),
+    )
+
+
+def _apply_output_transform_to_result(
+    result: TrajectoryEstimateResult,
+    cfg: Dict,
+) -> TrajectoryEstimateResult:
+    if _output_transform_is_identity(cfg):
+        return result
+    return TrajectoryEstimateResult(
+        raw_traj=_apply_output_transform_to_trajectory(result.raw_traj, cfg),
+        smoothed_traj=_apply_output_transform_to_trajectory(result.smoothed_traj, cfg),
+        final_traj=_apply_output_transform_to_trajectory(result.final_traj, cfg),
+        loop_debug=_apply_output_transform_to_loop_debug(result.loop_debug, cfg),
+        mode=result.mode,
+        relative_scale=result.relative_scale,
+        estimated_loop_period_sec=result.estimated_loop_period_sec,
+        line_valid_ratio=result.line_valid_ratio,
+        tape_diagnostics=result.tape_diagnostics,
+    )
 
 
 def _apply_soft_loop_closure(
@@ -2089,7 +2297,7 @@ def estimate_trajectory_with_details(
                     frame_timestamps=frame_timestamps,
                 )
                 if _tape_line_result_is_usable(tape_result, cfg):
-                    return tape_result
+                    return _apply_output_transform_to_result(tape_result, cfg)
             except Exception:
                 pass
         try:
@@ -2101,31 +2309,40 @@ def estimate_trajectory_with_details(
                 frame_timestamps=frame_timestamps,
             )
             if _generic_vio_result_is_usable(generic_result, cfg):
-                return generic_result
+                return _apply_output_transform_to_result(generic_result, cfg)
         except Exception:
             pass
-        return _estimate_tape_line_trajectory_with_details(
-            video_path=video_path,
-            imu_samples=imu_samples,
-            cfg=cfg,
-            save_debug_video=save_debug_video,
-            frame_timestamps=frame_timestamps,
+        return _apply_output_transform_to_result(
+            _estimate_tape_line_trajectory_with_details(
+                video_path=video_path,
+                imu_samples=imu_samples,
+                cfg=cfg,
+                save_debug_video=save_debug_video,
+                frame_timestamps=frame_timestamps,
+            ),
+            cfg,
         )
     mode = _resolve_trajectory_mode(cfg, imu_samples)
     if mode == 'generic_vio':
-        return _estimate_generic_vio_trajectory_with_details(
+        return _apply_output_transform_to_result(
+            _estimate_generic_vio_trajectory_with_details(
+                video_path=video_path,
+                imu_samples=imu_samples,
+                cfg=cfg,
+                save_debug_video=save_debug_video,
+                frame_timestamps=frame_timestamps,
+            ),
+            cfg,
+        )
+    return _apply_output_transform_to_result(
+        _estimate_tape_line_trajectory_with_details(
             video_path=video_path,
             imu_samples=imu_samples,
             cfg=cfg,
             save_debug_video=save_debug_video,
             frame_timestamps=frame_timestamps,
-        )
-    return _estimate_tape_line_trajectory_with_details(
-        video_path=video_path,
-        imu_samples=imu_samples,
-        cfg=cfg,
-        save_debug_video=save_debug_video,
-        frame_timestamps=frame_timestamps,
+        ),
+        cfg,
     )
 
 
