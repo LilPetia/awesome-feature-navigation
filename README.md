@@ -1,6 +1,7 @@
 # Awesome Feature Navigation
 
-[![CI](https://github.com/LilPetia/awesome-feature-navigation/actions/workflows/ci.yml/badge.svg)](https://github.com/LilPetia/awesome-feature-navigation/actions/workflows/ci.yml)
+[![CI](https://github.com/LilPetia/awesome-feature-navigation/actions/workflows/ci.yml/badge.svg?branch=clean-uv-solve)](https://github.com/LilPetia/awesome-feature-navigation/actions/workflows/ci.yml?query=branch%3Aclean-uv-solve)
+[![Coverage](https://img.shields.io/endpoint?url=https%3A%2F%2Fraw.githubusercontent.com%2FLilPetia%2Fawesome-feature-navigation%2Fclean-uv-solve%2Fbadges%2Fcoverage.json)](https://github.com/LilPetia/awesome-feature-navigation/actions/workflows/ci.yml?query=branch%3Aclean-uv-solve)
 [![Python](https://img.shields.io/badge/python-3.10--3.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![uv](https://img.shields.io/badge/package%20manager-uv-2f80ed)](https://docs.astral.sh/uv/)
 [![OpenCV](https://img.shields.io/badge/vision-OpenCV-green)](https://opencv.org/)

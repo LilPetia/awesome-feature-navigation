@@ -52,3 +52,36 @@ jobs:
         with:
           name: coverage-python-3.12
           path: coverage.xml
+
+  coverage-badge:
+    name: Coverage badge
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Download coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: coverage-python-3.12
+          path: .
+
+      - name: Update coverage badge
+        run: python scripts/coverage_summary.py coverage.xml --badge badges/coverage.json
+
+      - name: Commit coverage badge
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add badges/coverage.json
+          if git diff --cached --quiet; then
+            echo "Coverage badge is up to date."
+            exit 0
+          fi
+          git commit -m "Update coverage badge [skip ci]"
+          git push origin HEAD:${{ github.ref_name }}
