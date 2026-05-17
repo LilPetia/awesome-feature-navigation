@@ -4,7 +4,8 @@
 
 Документ описывает текущий алгоритм проекта `awesome-feature-navigation` для построения 2D-траектории робота по:
 
-- видео с правой камеры;
+- видео с камеры ZED, в основном по `Right_cam.mp4`;
+- дополнительному видео `Left_cam.mp4` для двухкамерного усреднения той же поездки;
 - timestamps видеокадров;
 - IMU-измерениям;
 - YAML-калибровкам камеры и IMU;
@@ -18,6 +19,7 @@
 
 | Зона ответственности | Модуль |
 | --- | --- |
+| Версия пакета и package metadata | `src/awesome_feature_navigation/__init__.py` |
 | CLI, объединение конфига, запуск пайплайна | `src/awesome_feature_navigation/cli.py` |
 | Загрузка frame timestamps и Kalibr YAML | `src/awesome_feature_navigation/calibration.py` |
 | Загрузка IMU CSV, сдвиг времени, remap осей, поворот в camera frame | `src/awesome_feature_navigation/imu_io.py` |
@@ -26,6 +28,281 @@
 | Автонастройка цвета и HSV по сэмплам видео | `src/awesome_feature_navigation/auto_config.py` |
 | Оценка траектории, выбор режима, loop averaging | `src/awesome_feature_navigation/trajectory.py` |
 | Сохранение CSV и HTML-графиков | `src/awesome_feature_navigation/plotting.py` |
+| Двухкамерное усреднение LEFT/RIGHT траекторий | `src/awesome_feature_navigation/fusion.py` |
+| CLI для усреднения LEFT/RIGHT CSV | `src/awesome_feature_navigation/fusion_cli.py` |
+
+### 2.1 `src/awesome_feature_navigation/__init__.py`
+
+Пакетный файл хранит версию библиотеки:
+
+```text
+__version__ = "0.1.0"
+```
+
+Он нужен для того, чтобы пакет имел стабильную metadata-точку. В нем нет алгоритмической логики: импорт этого файла не должен открывать видео, читать конфиги, создавать output-файлы или запускать тяжелые зависимости.
+
+### 2.2 `src/awesome_feature_navigation/cli.py`
+
+`cli.py` - граница между пользователем и алгоритмом. Его задача не в том, чтобы оценивать траекторию самостоятельно, а в том, чтобы собрать корректное состояние запуска:
+
+1. прочитать YAML-конфиг;
+2. применить CLI overrides;
+3. зарезолвить относительные пути относительно файла конфига;
+4. добавить параметры из Kalibr YAML;
+5. включить camera-IMU defaults после чтения camchain;
+6. запустить auto-config линии;
+7. загрузить timestamps и IMU;
+8. привести video time и IMU time к одной шкале;
+9. вызвать `estimate_trajectory_with_details()`;
+10. сохранить все CSV/HTML/debug outputs.
+
+Теоретически это слой orchestration. Он не должен содержать CV-математику и не должен напрямую знать, как устроены Procrustes, Lucas-Kanade или IMU preintegration. Это снижает coupling: можно менять алгоритм в `trajectory.py`, не переписывая CLI.
+
+Ключевые helper-функции:
+
+- `_load_cfg()` читает YAML и возвращает dict; пустой конфиг разрешен.
+- `_resolve_path()` делает относительные пути устойчивыми: если путь из YAML существует рядом с YAML, используется он.
+- `_parse_lap_bounds()` поддерживает секунды и формат `M:S`/`H:M:S`.
+- `_normalize_time_base()` решает, нужно ли вычитать первый video timestamp из кадров и IMU.
+- `_merge_calibration_cfg()` добавляет в основной dict значения из calibration loaders.
+
+Главная тонкость `cli.py` - time base. Видео и IMU могут быть записаны в абсолютных наносекундах. Если их не привести к одной шкале, IMU-нарезка между кадрами будет пустой или сдвинутой, а yaw-интеграция станет бессмысленной.
+
+### 2.3 `src/awesome_feature_navigation/calibration.py`
+
+`calibration.py` отвечает за файлы, которые описывают измерительную систему, но не являются самой траекторией:
+
+- frame timestamps CSV;
+- Kalibr IMU YAML;
+- Kalibr camera-IMU camchain YAML.
+
+`load_frame_timestamps_csv()` ищет timestamp column, опционально сортирует строки по frame index и масштабирует время. Сортировка важна теоретически: последовательность кадров является временным рядом, поэтому перестановка строк в CSV не должна менять физический порядок кадров. Если timestamp не найден, функция падает явно, потому что молчаливый fallback на FPS дал бы скрытый сдвиг IMU.
+
+`load_imu_calibration_config()` переносит параметры шума Kalibr в внутренние ключи. Эти параметры нужны для GTSAM preintegration covariance. Даже если сейчас основной рабочий режим использует fallback-интегратор, хранение этих параметров делает код расширяемым.
+
+`load_camchain_calibration_config()` читает `T_cam_imu`, `timeshift_cam_imu`, intrinsics, distortion metadata и resolution. Из `T_cam_imu` используются:
+
+```text
+R_cam_imu = T_cam_imu[0:3, 0:3]
+t_cam_imu = T_cam_imu[0:3, 3]
+```
+
+Поворот нужен уже сейчас для перевода accel/gyro в camera frame. Translation сохраняется как metadata: она потребуется, если добавлять полноценную stereo/VIO-модель с extrinsics.
+
+### 2.4 `src/awesome_feature_navigation/imu_io.py`
+
+`imu_io.py` превращает CSV и calibration config в поток `IMUSample(t, accel, omega)`, пригодный для интегрирования.
+
+Основные операции:
+
+- `_pick_col()` ищет колонки по точному имени и по нормализованному substring. Это поддерживает разные ROS/ZED/Kalibr naming styles.
+- `_parse_axis_spec()` понимает `x`, `-x`, `+z` и возвращает индекс оси и знак.
+- `_apply_axis_map()` переставляет и отражает оси accel/gyro.
+- `_rotation_matrix_from_cfg()` принимает 3x3, 4x4, flat 9 или flat 16 matrix.
+- `_rotation_from_a_to_b()` строит минимальный 3D-поворот между двумя векторами через cross product и Rodrigues-like формулу.
+- `load_imu_csv()` читает CSV, масштабирует время и gyro, сортирует по `t`.
+- `calibrate_imu_samples()` применяет axis remap, bias, camera rotation, gravity alignment и yaw-only reduction.
+- `shift_imu_samples()` переносит IMU timestamps на другую временную шкалу.
+- `slice_imu()` вырезает IMU-сегмент между двумя timestamp кадрами и добавляет соседние измерения по краям.
+
+Теоретический смысл `slice_imu()` важен: интеграл по интервалу `[t0, t1]` не должен зависеть только от сэмплов строго внутри интервала. Если первый IMU-сэмпл после `t0`, то нужно добавить предыдущий сэмпл, иначе первый кусок интеграла теряется.
+
+Gravity alignment используется как pragmatic 2D-приближение. Средний accel на старте/записи считается направлением гравитации, после чего строится поворот к `[0, 0, -1]`. Это не заменяет полноценную ориентационную оценку, но уменьшает смешивание roll/pitch с yaw для плоского движения.
+
+### 2.5 `src/awesome_feature_navigation/imu_preintegration.py`
+
+`imu_preintegration.py` реализует интегрирование IMU между двумя видеокадрами. Есть две ветки:
+
+1. GTSAM, если пакет установлен.
+2. Minimal fallback, если GTSAM недоступен.
+
+`IMUSample` хранит один сэмпл:
+
+```text
+t
+accel[3]
+omega[3]
+```
+
+`PreintegrationResult` хранит интеграл на интервале:
+
+```text
+delta_t
+delta_R
+delta_v
+delta_p
+covariance
+delta_yaw
+```
+
+GTSAM-ветка создает `PreintegrationParams`, задает covariance accel/gyro/bias, затем вызывает `integrateMeasurement()` для каждого положительного `dt`. Это математически ближе к стандартной visual-inertial preintegration: измерения IMU сворачиваются в один relative motion factor между двумя состояниями.
+
+Fallback-ветка нужна, чтобы проект работал без тяжелой зависимости. Она использует экспоненту SO(3):
+
+```text
+R_next = R * exp(omega * dt)
+v_next = v + R * accel * dt
+p_next = p + v * dt + 0.5 * R * accel * dt^2
+```
+
+Для текущего `tape_line` основная ценность preintegration - `delta_yaw`. `delta_p` доступен, но по умолчанию не используется из-за квадратичного дрейфа double integration.
+
+### 2.6 `src/awesome_feature_navigation/line_detection.py`
+
+`line_detection.py` отвечает за извлечение геометрического наблюдения цветной линии из одного кадра.
+
+`COLOR_PRESETS` задает базовые HSV-диапазоны для:
+
+```text
+red, blue, green, yellow, white
+```
+
+`resolve_target_color()` защищает от неправильного цвета и возвращает `blue` по умолчанию. `resolve_hsv_ranges()` выбирает явные `hsv_ranges`, legacy red keys или preset.
+
+`LineDetector.process()` выполняет pipeline:
+
+1. resize кадра;
+2. BGR -> HSV;
+3. optional HSV auto-tune внутри ROI;
+4. binary mask через `cv2.inRange`;
+5. median blur;
+6. largest connected component;
+7. удаление верхней половины и нижней полосы кадра;
+8. morphological close;
+9. distance transform;
+10. centerline по argmax distance в каждой строке ROI;
+11. smoothing centerline;
+12. расчет угла и bottom-x.
+
+Теория distance transform здесь простая: для каждой точки маски расстояние до ближайшего фона максимально около геометрической середины ленты. Поэтому `argmax` по строке дает центральную линию без явного skeletonization.
+
+Угол линии может считаться глобально через PCA (`_fit_direction`) или локально по нижнему сегменту (`_fit_local_direction`). Локальный угол важен для управления роботом: нижняя часть кадра ближе к роботу, значит она лучше отражает ближайшее направление движения.
+
+`bottom_x` - оценка горизонтального положения линии около нижней части ROI. Она используется как lateral error: если линия не по центру кадра, trajectory получает боковую correction.
+
+### 2.7 `src/awesome_feature_navigation/auto_config.py`
+
+`auto_config.py` уменьшает ручной подбор HSV под конкретное видео. Он не знает правильную траекторию и не использует координаты ответа. Он только выбирает цвет и HSV-диапазоны по качеству line detection на сэмплах кадров.
+
+Алгоритм:
+
+1. `_sample_frames()` берет равномерные кадры по frame count или stride.
+2. Для каждого candidate color запускается `LineDetector`.
+3. `_observation_score()` оценивает наблюдение по длине centerline, vertical span, bottom hit, площади mask и валидности угла.
+4. `_score_color()` считает mean score и valid ratio.
+5. `infer_line_config_from_video()` выбирает цвет с максимальным rank.
+6. `_collect_line_hsv_pixels()` собирает HSV-пиксели внутри надежных line masks.
+7. `_build_ranges_from_pixels()` пересобирает HSV ranges по percentiles.
+8. `apply_auto_video_config()` вписывает найденный цвет/ranges в копию конфига.
+
+Почему используются percentiles, а не min/max: отдельные пиксели могут быть бликами, шумом или краями ленты. Percentile-диапазон устойчивее к выбросам и лучше переносится между кадрами.
+
+### 2.8 `src/awesome_feature_navigation/trajectory.py`
+
+`trajectory.py` - основной алгоритмический модуль. Он содержит:
+
+- dataclasses результата (`TrajectoryPoint`, `TrajectoryEstimateResult`, diagnostics);
+- pure geometry helpers;
+- extraction и canonicalization кругов;
+- offline smoothing для line observations;
+- `tape_line` estimator;
+- `generic_vio` estimator;
+- auto-dispatch между режимами;
+- output transforms.
+
+Геометрическая часть использует:
+
+- rigid Procrustes alignment через SVD;
+- optional similarity alignment со scale;
+- resampling polyline по длине дуги;
+- robust MAD-filter;
+- Fourier smoothing closed path;
+- closed Catmull-Rom spline;
+- projection точек на замкнутый путь;
+- self-intersection checks.
+
+`tape_line` часть берет `TapeObservation` из `line_detection.py`, считает confidence, сглаживает angle/bottom-x по времени, интегрирует yaw из IMU и движение вперед через `forward_speed_mps`, затем применяет lateral correction. Если найден надежный период круга, включаются variable speed correction, soft loop closure и representative-lap final.
+
+`generic_vio` часть использует feature tracking:
+
+```text
+goodFeaturesToTrack -> Lucas-Kanade optical flow -> forward-backward check -> estimateAffinePartial2D
+```
+
+Из affine transform извлекаются относительные yaw и translation в normalized image coordinates. Yaw смешивается с IMU yaw. Масштаб остается относительным, потому что monocular-видео без depth/stereo не задает абсолютную длину перемещения.
+
+`estimate_trajectory_with_details()` - главная функция модуля. Она выбирает режим, запускает estimator, проверяет пригодность результата и возвращает полный `TrajectoryEstimateResult`, включая raw/smoothed/final trajectory и diagnostics.
+
+### 2.9 `src/awesome_feature_navigation/plotting.py`
+
+`plotting.py` не меняет алгоритм траектории. Он сериализует результаты:
+
+- `save_trajectory_csv()` пишет `t,x,y,yaw`.
+- `save_trajectory_plot()` строит интерактивный Plotly HTML или static image.
+- `save_tape_diagnostics_csv/plot()` сохраняет confidence, angles, bottom-x, speed и IMU yaw deltas.
+- `save_loop_debug_csv/plot()` сохраняет raw/aligned/projected laps, representative loop и spline controls.
+
+Важная инженерная деталь: Plotly HTML export получает `toImageButtonOptions` с большим `width`, `height` и `scale`, чтобы скачиваемые PNG из браузера были качественными. Для static image используется `write_image`; если `kaleido` не установлен, пользователь получает понятное предупреждение.
+
+### 2.10 `src/awesome_feature_navigation/fusion.py`
+
+`fusion.py` реализует двухкамерное усреднение уже построенных 2D-траекторий. Он не открывает `Left_cam.mp4` и `Right_cam.mp4` напрямую: эти видео сначала независимо обрабатываются обычным `afn-run`, а `fusion.py` получает на вход два CSV с колонками `t,x,y,yaw`.
+
+Основные публичные сущности:
+
+- `load_trajectory_csv()` читает CSV, проверяет наличие колонок `t,x,y,yaw`, отбрасывает неявные ошибки через `ValueError` и возвращает список `TrajectoryPoint`.
+- `fuse_trajectories()` принимает LEFT и RIGHT trajectory lists, ресэмплирует обе петли к одному числу точек, выравнивает LEFT к RIGHT и возвращает `TrajectoryFusionResult`.
+- `TrajectoryFusionDiagnostics` хранит `sample_count`, `phase_shift`, `alignment_rmse`, `reverse_used`, `scale`.
+
+Алгоритм `fuse_trajectories()`:
+
+1. Проверяет, что обе траектории содержат минимум две точки.
+2. Ресэмплирует LEFT и RIGHT как замкнутые polyline через длину дуги.
+3. Берет RIGHT как reference frame.
+4. Выравнивает LEFT к RIGHT через `_align_lap_to_template(..., allow_scale=False)`.
+5. Если `allow_reverse=True`, отдельно пробует LEFT в обратном порядке.
+6. Выбирает вариант с меньшим alignment RMSE.
+7. Строит fused координаты:
+
+```text
+F_i = 0.5 * (R_i + L_aligned_i)
+```
+
+8. По fused координатам пересчитывает yaw из локальной производной пути.
+9. Возвращает fused trajectory, aligned LEFT trajectory, resampled RIGHT trajectory и diagnostics.
+
+Почему RIGHT используется как reference: это не означает, что RIGHT считается "правильным ответом". Reference задает только систему координат, стартовую фазу и направление вывода. После rigid alignment вклад в координаты идет симметрично: `0.5 * RIGHT + 0.5 * LEFT_aligned`.
+
+Почему `allow_scale=False`: обе траектории должны быть в одной метрической шкале, заданной `forward_speed_mps` и одинаковым loop extraction. Автоматическая scale-подгонка могла бы скрыть ошибку скорости или неверное выделение круга.
+
+### 2.11 `src/awesome_feature_navigation/fusion_cli.py`
+
+`fusion_cli.py` - пользовательская обертка над `fusion.py`. Команда зарегистрирована в `pyproject.toml` как:
+
+```text
+afn-fuse = "awesome_feature_navigation.fusion_cli:main"
+```
+
+Она принимает:
+
+- `--left` - CSV траектории, построенной по `Left_cam.mp4`;
+- `--right` - CSV траектории, построенной по `Right_cam.mp4`;
+- `--out` - output prefix;
+- `--samples` - число точек для общего ресэмплинга;
+- `--phase-search-fraction` - ширина поиска фазового сдвига;
+- `--no-reverse-search` - отключение проверки обратного направления LEFT;
+- `--save-aligned-debug` - сохранение aligned LEFT и resampled RIGHT для диагностики.
+
+Основные outputs:
+
+```text
+outputs/fused_trajectory.csv
+outputs/fused_trajectory.html
+outputs/fused_trajectory_left_aligned.csv/html
+outputs/fused_trajectory_right_resampled.csv/html
+```
+
+Debug outputs нужны, чтобы визуально проверить, что LEFT действительно легла на RIGHT перед усреднением. Если `alignment_rmse` высокий, усредненную траекторию нельзя считать надежной: проблема может быть в другом направлении обхода, плохом круге, разных конфигах или неверном входном CSV.
 
 ## 3. Входные данные
 
@@ -34,6 +311,7 @@
 | Вход | Проектный путь | Назначение |
 | --- | --- | --- |
 | Видео | `data/Right_cam.mp4` | Видеопоток с правой камеры. |
+| Видео левой камеры | `data/Left_cam.mp4` | Видеопоток с левой камеры той же поездки; используется для независимой оценки и последующего усреднения с RIGHT. |
 | IMU CSV | `data/imu_data.csv` | Сэмплы IMU: timestamp, acceleration, angular velocity. |
 | Основной конфиг | `configs/right_camera.yaml` | Параметры пайплайна и пути к дополнительным файлам. |
 | Output prefix | `outputs/right_trajectory` | Префикс выходных CSV/HTML/debug-файлов. |
@@ -203,7 +481,7 @@ offline_soft_loop_closure: true
 loop_average: true
 loop_strategy: representative_lap
 loop_similarity_align: false
-loop_fourier_harmonics: auto
+loop_fourier_harmonics: 12
 loop_min_kept_laps: 2
 loop_max_alignment_rmse_ratio: 0.80
 loop_max_projection_rmse_ratio: 0.70
@@ -252,7 +530,7 @@ offline_soft_loop_closure: true
 loop_average: true
 loop_strategy: representative_lap
 loop_similarity_align: false
-loop_fourier_harmonics: auto
+loop_fourier_harmonics: 12
 loop_min_kept_laps: 2
 loop_max_alignment_rmse_ratio: 0.80
 loop_max_projection_rmse_ratio: 0.70
@@ -973,10 +1251,10 @@ offline_soft_loop_closure: true
 loop_average: true
 loop_strategy: representative_lap
 loop_similarity_align: false
-loop_fourier_harmonics: auto
+loop_fourier_harmonics: 12
 ```
 
-`loop_strategy: representative_lap` означает, что финальная петля берется из лучшего наблюдаемого круга, а не как средняя synthetic-кривая. `loop_similarity_align: false` запрещает масштабное растяжение кругов при alignment. `loop_fourier_harmonics: auto` выбирает число гармоник от `loop_samples`, чтобы сохранить больше формы, чем низкочастотный эллипс.
+`loop_strategy: representative_lap` означает, что финальная петля берется из лучшего наблюдаемого круга, а не как средняя synthetic-кривая. `loop_similarity_align: false` запрещает масштабное растяжение кругов при alignment. `loop_fourier_harmonics: 12` задает умеренное Fourier-сглаживание: оно убирает высокочастотный шум линии, но не превращает петлю в низкочастотный эллипс.
 
 ### 15.2 Оценка периода круга
 
@@ -1067,6 +1345,85 @@ smoothed_traj = offline smoothing + variable speed
 final_traj    = closed representative lap from smoothed_traj
 ```
 
+### 15.8 Усреднение LEFT и RIGHT траекторий
+
+ZED дает два синхронных видеопотока: `Left_cam.mp4` и `Right_cam.mp4`. Это не две разные поездки, а одна и та же физическая траектория робота, наблюдаемая двумя оптическими центрами. В проекте это реализовано отдельной командой `afn-fuse`, которая усредняет уже построенные CSV-траектории:
+
+1. Построить траекторию по `Left_cam.mp4`.
+2. Построить траекторию по `Right_cam.mp4`.
+3. Передать два CSV в `afn-fuse`.
+4. Привести обе траектории к одному числу sample points.
+5. Проверить прямое и обратное направление LEFT.
+6. Выровнять phase, потому что стартовая точка canonical loop может немного отличаться.
+7. Выровнять LEFT к RIGHT через rigid Procrustes transform.
+8. Усреднить соответствующие точки.
+9. Сохранить fused trajectory как итоговую двухкамерную оценку.
+
+Команды:
+
+```bash
+uv run afn-run \
+  --video data/Left_cam.mp4 \
+  --imu data/imu_data.csv \
+  --config configs/right_camera.yaml \
+  --out outputs/left_trajectory
+
+uv run afn-run \
+  --video data/Right_cam.mp4 \
+  --imu data/imu_data.csv \
+  --config configs/right_camera.yaml \
+  --out outputs/right_trajectory
+
+uv run afn-fuse \
+  --left outputs/left_trajectory.csv \
+  --right outputs/right_trajectory.csv \
+  --out outputs/fused_trajectory \
+  --save-aligned-debug
+```
+
+Усреднять нужно не кадры и не пиксельные наблюдения, а уже построенные 2D-траектории. Причина: левая и правая камеры имеют разные optical centers, поэтому одна и та же линия на полу проецируется в разные пиксельные координаты. Даже если робот едет по одной линии, `bottom_x`, локальный угол centerline и optical flow в LEFT и RIGHT не обязаны совпадать покадрово. После построения 2D-траектории эти различия становятся ошибками оценки в общей плоскости движения, и их уже можно уменьшать геометрическим выравниванием.
+
+Базовая математическая модель fusion:
+
+```text
+R = right representative loop, shape (N, 2)
+L = left representative loop,  shape (N, 2)
+
+L_aligned = rigid_align_with_phase_search(L, R)
+F = 0.5 * (R + L_aligned)
+```
+
+В реализации RIGHT задает reference frame для вывода, а не "правильный ответ". LEFT поворачивается и переносится в систему RIGHT, после чего координаты усредняются с одинаковыми весами.
+
+Если одна камера дает более надежное наблюдение, вместо обычного среднего можно использовать weighted average:
+
+```text
+F_i = (w_R_i * R_i + w_L_i * L_aligned_i) / (w_R_i + w_L_i)
+```
+
+Где веса могут зависеть от diagnostics: valid ratio, confidence, alignment RMSE, projection RMSE или доли кадров, в которых линия была надежно видна.
+
+Почему нужен rigid Procrustes, а не простое среднее координат:
+
+- каждая монокулярная оценка может иметь небольшой поворот глобальной системы координат;
+- стартовая точка canonical loop может быть сдвинута по фазе;
+- output transform может отличаться между LEFT и RIGHT;
+- reverse-lap normalization должен привести обход к одному направлению;
+- без выравнивания среднее двух одинаковых окружностей со сдвигом фазы может искусственно уменьшить петлю или исказить форму.
+
+Почему scale лучше не подгонять автоматически:
+
+- в текущем `tape_line` метрический масштаб задается `forward_speed_mps`;
+- если разрешить similarity scale без ограничения, можно скрыть ошибку скорости или loop extraction;
+- поэтому базовый вариант fusion должен использовать rigid transform без масштаба, а scale менять только явно и обоснованно.
+
+Ожидаемый практический эффект:
+
+- случайные ошибки HSV/centerline одной камеры частично компенсируются другой;
+- локальные ошибки видимости линии меньше влияют на итог;
+- representative loop становится стабильнее;
+- residual LEFT -> RIGHT после alignment становится диагностикой качества двухкамерной оценки.
+
 ## 16. Ошибки и fallback-поведение
 
 | Ситуация | Поведение |
@@ -1091,7 +1448,251 @@ final_traj    = closed representative lap from smoothed_traj
 6. В проекте нет factor graph optimization, bundle adjustment, SLAM loop closure и map reuse.
 7. Loop averaging работает только для повторяющихся траекторий и не заменяет полноценный loop closure.
 
-## 18. Проверочный чеклист
+## 18. Тестовая спецификация
+
+Тесты являются частью спецификации поведения. Они не проверяют визуальное сходство с заранее нарисованной траекторией. Вместо этого они фиксируют инварианты: корректность парсинга данных, устойчивость к пустым входам, математические свойства helper-функций, отказ от плохих loop candidates и стабильность форматов output.
+
+Текущий обязательный порог:
+
+```text
+pytest coverage >= 95%
+```
+
+Порог задан в `Makefile` и в GitHub Actions через `--cov-fail-under=95`. Badge в README строится из `badges/coverage.json`, который обновляет GitHub workflow после успешного push.
+
+### 18.1 `tests/test_calibration.py`
+
+Проверяет `calibration.py`.
+
+Что покрывается:
+
+- перенос Kalibr IMU полей `accelerometer_noise_density`, `gyroscope_noise_density`, random walk, update rate и time offset во внутренний config;
+- чтение `T_cam_imu` из camchain, разделение матрицы на rotation и translation;
+- сохранение `timeshift_cam_imu`, intrinsics, distortion, camera model, distortion model, resolution и rostopic;
+- сортировка frame timestamps по frame index;
+- масштабирование timestamps через `time_scale`;
+- ошибки на CSV без timestamp column, пустом CSV и non-finite timestamp;
+- поведение на YAML, где ожидаемый mapping отсутствует.
+
+Теоретический смысл: timestamps и extrinsics являются основой синхронизации. Если timestamps не отсортированы или `timeshift_cam_imu` потерян, IMU будет интегрироваться на неправильных интервалах. Поэтому тесты проверяют не только happy path, но и отказ от невалидных входов.
+
+### 18.2 `tests/test_imu_io.py` и `tests/test_imu_more.py`
+
+Проверяют `imu_io.py` и `imu_preintegration.py`.
+
+Что покрывается:
+
+- поиск IMU колонок по разным naming styles;
+- сортировка IMU samples по времени;
+- `imu_time_scale` и `imu_gyro_scale`;
+- ошибка при отсутствии timestamp/accel/gyro колонок;
+- axis remap через `x`, `-x`, `+z`;
+- ошибка на axis map длиной не 3;
+- чтение rotation matrix из 3x3, 4x4, flat 9 и flat 16;
+- поворот вектора `a -> b`, включая нулевые, одинаковые, противоположные и обычные направления;
+- gravity alignment к `[0, 0, -1]`;
+- yaw-only calibration, yaw bias window и non-yaw-only ветка;
+- `shift_imu_samples()` без мутации accel/gyro;
+- `slice_imu()` с добавлением соседних сэмплов у границ интегрирования;
+- fallback SO(3) preintegration;
+- накопление preintegration при `reset=False`;
+- пропуск неположительного `dt`;
+- fake-GTSAM ветка без установки настоящего `gtsam`;
+- `MinimalRot3`, `_skew`, `_so3_exp`, `rot3_yaw`.
+
+Теоретический смысл: IMU - шумный временной сигнал. Тесты фиксируют, что мы не теряем порядок времени, не путаем оси, не ломаем bias correction и корректно обрабатываем интервалы между кадрами. Fake-GTSAM тест нужен, чтобы проверить код стандартной preintegration-ветки в среде, где зависимость может быть не установлена.
+
+### 18.3 `tests/test_line_detection.py` и `tests/test_line_detection_more.py`
+
+Проверяют `line_detection.py`.
+
+Что покрывается:
+
+- fallback target color к `blue`;
+- blue HSV preset;
+- legacy red HSV ranges только при `target_color: red`;
+- нормализация low/high HSV и clipping в допустимые границы;
+- PCA/global angle;
+- local bottom-segment angle;
+- смешивание углов через unit vectors;
+- degenerate cases: пустые точки, одна точка, нулевой вектор, противоположные углы;
+- `bottom_x` через mean/median;
+- сглаживание centerline и rendering single-point/polyline centerline;
+- auto-tune HSV для white и цветных линий;
+- обработка синтетической синей линии;
+- fallback на предыдущую centerline при плохом следующем кадре.
+
+Теоретический смысл: line detection должен быть устойчив к типичным CV-краевым случаям. Угол линии не должен превращаться в NaN там, где есть достаточная геометрия, а HSV-настройки не должны выходить за физические границы OpenCV HSV.
+
+### 18.4 `tests/test_auto_config.py`
+
+Проверяет `auto_config.py`.
+
+Что покрывается:
+
+- выбор сэмплов по `CAP_PROP_FRAME_COUNT`;
+- fallback sampling по stride, если frame count неизвестен;
+- ошибка на неоткрываемом видео;
+- preset HSV ranges для поддержанных цветов;
+- scoring наблюдения по маске, centerline, площади, bottom hit и валидности угла;
+- penalty для слишком маленькой, слишком большой и слишком широкой mask;
+- выбор лучшего candidate color по `mean_score + 1.5 * valid_ratio`;
+- empty frames -> zero score;
+- сбор HSV-пикселей только из надежных line masks;
+- пропуск слабых наблюдений и shape mismatch;
+- downsample больших masks;
+- percentile-based HSV ranges для blue/green/yellow/red/white;
+- special red split на две hue-группы;
+- расширение слишком узкого hue диапазона;
+- отключение `auto_video_config` и `auto_detect_line`;
+- сохранение исходного конфига при неуспешной автонастройке.
+
+Теоретический смысл: auto-config не должен подгонять траекторию. Он может смотреть только на изображение линии и качество segmentation. Поэтому тесты проверяют именно локальные свойства маски/HSV, а не форму финального пути.
+
+### 18.5 `tests/test_offline_tape_line.py`
+
+Проверяет offline-режим `tape_line` в `trajectory.py`.
+
+Что покрывается:
+
+- положительный confidence для чистой centerline;
+- игнорирование low-confidence angle outlier;
+- time-based smoothing window по timestamps, а не по жесткому числу кадров;
+- adaptive confidence threshold по распределению confidence;
+- разделение `raw_traj`, `smoothed_traj`, `final_traj`;
+- diagnostics mask для валидных/невалидных кадров;
+- отказ от loop canonicalization при плохо согласованных кругах;
+- выбор только forward laps;
+- включение reverse laps через `loop_normalize_reverse_laps`;
+- распределение single closing jump по петле;
+- output transform, например flip X.
+
+Теоретический смысл: offline smoothing имеет доступ ко всей записи, поэтому может использовать centered weighted average и adaptive threshold. Но он обязан отбрасывать слабые кадры и не должен строить искусственную замкнутую петлю, если круги геометрически плохо повторяются.
+
+### 18.6 `tests/test_trajectory_helpers.py`
+
+Проверяет чистую математику `trajectory.py` без настоящего видео.
+
+Что покрывается:
+
+- `_clamp`, `_cfg_float`, `_cfg_bool_any`;
+- IMU preintegration params builder;
+- angle blending с NaN и противоположными направлениями;
+- frame time fallback;
+- rigid Procrustes alignment и reflection correction;
+- similarity alignment и scale limits;
+- RMSE;
+- anchor scoring и anchor choice;
+- robust MAD keep mask;
+- open/closed polyline resampling по длине дуги;
+- manual/periodic lap extraction;
+- нормализация lap directions;
+- reverse-lap normalization;
+- Fourier smoothing;
+- canonical loop build;
+- representative lap selection;
+- projection points to closed path;
+- conversion loop -> trajectory;
+- segment intersection и self-intersection count;
+- confidence, smoothing, adaptive threshold;
+- tape motion terms;
+- trajectory integration with speed scales;
+- loop boundary indices;
+- soft loop closure;
+- output transforms для trajectory и loop debug;
+- synthetic feature descriptors, normalized similarity transform и mode usability checks.
+
+Теоретический смысл: это regression layer для геометрии. Если сломать SVD alignment, resampling или robust filtering, итоговая траектория может визуально стать правдоподобной, но математически потерять повторяемость. Эти тесты ловят такие ошибки на малых контролируемых данных.
+
+### 18.7 `tests/test_trajectory_edge_cases.py`
+
+Проверяет редкие и отказные ветки `trajectory.py`.
+
+Что покрывается:
+
+- empty/degenerate anchor scores;
+- resampling нулевых и повторяющихся точек;
+- alignment при коротких/плохих данных;
+- manual laps с почти одинаковыми boundaries;
+- invalid lap direction fallback;
+- closed path edge cases;
+- spline/canonical loop edge cases;
+- плохие `manual_lap_bounds_sec`;
+- rejection по `loop_min_kept_laps`, alignment RMSE и projection RMSE;
+- speed scale solver при пустом и вырожденном входе;
+- empty offline tape-line estimate;
+- failure branches optical flow и transform estimation.
+
+Теоретический смысл: эти тесты защищают от скрытых падений на реальных данных, где видео может закончиться раньше, IMU может отсутствовать, frame tracking может вернуть `None`, а loop segmentation может дать слишком короткий круг.
+
+### 18.8 `tests/test_trajectory_video_paths.py`
+
+Проверяет ветки, которые обычно требуют OpenCV video IO, но делает это через fake capture/writer.
+
+Что покрывается:
+
+- `_write_tape_line_debug_video()` создает overlay frames и пишет их в fake writer;
+- `tape_line` estimator проходит по синтетическому видео с простой линией;
+- `generic_vio` estimator проходит по синтетическому видео с feature motion;
+- `estimate_trajectory_with_details()` dispatch-логика выбирает режим и fallback.
+
+Теоретический смысл: эти тесты проверяют glue code между OpenCV, estimator и result object. Fake objects позволяют тестировать это быстро и воспроизводимо, без хранения больших `.mp4` в репозитории.
+
+### 18.9 `tests/test_cli_helpers.py`
+
+Проверяет `cli.py`.
+
+Что покрывается:
+
+- parsing `--lap-bounds` в секундах и clock notation;
+- bool normalization для YAML/CLI значений;
+- определение absolute timestamps;
+- path resolution относительно config path;
+- time-base normalization для video и IMU;
+- merge calibration config;
+- полный `cli.main()` с monkeypatch dependencies;
+- wiring `--mode`, `--color`, `--auto-color`, IMU scales, calibration paths, frame timestamps, `--save-debug`, `--save-loop-debug`;
+- сохранение final/raw/smoothed/diagnostics/laps outputs;
+- печать mode, auto-line summary, time sync и calibration paths.
+
+Теоретический смысл: CLI-тест гарантирует, что алгоритм запускается с теми параметрами, которые пользователь реально указал. Это особенно важно для `manual_lap_bounds_sec`, calibration YAML и time sync.
+
+### 18.10 `tests/test_fusion.py`
+
+Проверяет `fusion.py` и `fusion_cli.py`.
+
+Что покрывается:
+
+- чтение trajectory CSV с колонками `t,x,y,yaw`;
+- ошибка при отсутствующих колонках;
+- ошибка при `nan`/`inf` координатах;
+- validation на слишком короткие траектории и слишком малое `sample_count`;
+- ресэмплинг LEFT и RIGHT к общему числу точек;
+- phase alignment между двумя петлями;
+- автоматический выбор reverse-направления LEFT, если левая камера дала ту же петлю в обратном порядке;
+- rigid alignment LEFT к RIGHT без scale-подгонки;
+- сохранение fused trajectory через `afn-fuse`;
+- сохранение `left_aligned` и `right_resampled` debug outputs.
+
+Теоретический смысл: двухкамерное усреднение должно уменьшать ошибку между двумя независимыми оценками одной поездки, а не подгонять траекторию под заранее нарисованный ответ. Поэтому тест строит синтетическую геометрию, где LEFT отличается от RIGHT только фазой, поворотом, переносом и направлением обхода. После alignment fused trajectory должна лечь на RIGHT reference frame с малым RMSE.
+
+### 18.11 `tests/test_plotting.py`
+
+Проверяет `plotting.py`.
+
+Что покрывается:
+
+- CSV header и строки trajectory output;
+- Plotly HTML export config;
+- `toImageButtonOptions` с высоким `width`, `height`, `scale`;
+- обработка отсутствующего `kaleido` для PNG/JPG export;
+- diagnostics CSV/plot;
+- loop debug CSV/plot для kept и rejected laps;
+- warnings на пустой trajectory, пустые diagnostics и пустой loop debug.
+
+Теоретический смысл: plotting - это часть пользовательского контракта. Даже если алгоритм вернул правильные точки, плохой export или низкое качество PNG делает результат неудобным для анализа и защиты проекта.
+
+## 19. Проверочный чеклист
 
 Перед сдачей изменений в алгоритме или конфиге нужно проверить:
 

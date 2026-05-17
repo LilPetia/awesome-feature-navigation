@@ -19,6 +19,7 @@ gtsam = [
 
 [project.scripts]
 afn-run = "awesome_feature_navigation.cli:main"
+afn-fuse = "awesome_feature_navigation.fusion_cli:main"
 
 [dependency-groups]
 dev = [
