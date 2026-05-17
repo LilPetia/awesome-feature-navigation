@@ -8,9 +8,6 @@ jobs:
   test:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -45,12 +42,13 @@ jobs:
       - name: Run Pytest
         run: uv run pytest --cov=awesome_feature_navigation --cov-report=term-missing --cov-report=xml:coverage.xml
 
-      - name: Upload coverage to Codecov
+      - name: Summarize coverage
         if: matrix.python-version == '3.12'
-        uses: codecov/codecov-action@v5
+        run: uv run python scripts/coverage_summary.py coverage.xml
+
+      - name: Upload coverage report
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
         with:
-          files: ./coverage.xml
-          flags: unittests
-          name: python-3.12
-          fail_ci_if_error: true
-          use_oidc: true
+          name: coverage-python-3.12
+          path: coverage.xml

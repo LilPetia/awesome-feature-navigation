@@ -2,7 +2,9 @@
 
 [![CI](https://github.com/LilPetia/awesome-feature-navigation/actions/workflows/ci.yml/badge.svg)](https://github.com/LilPetia/awesome-feature-navigation/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.10--3.14-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Codecov](https://codecov.io/gh/LilPetia/awesome-feature-navigation/branch/main/graph/badge.svg)](https://codecov.io/gh/LilPetia/awesome-feature-navigation)
+[![uv](https://img.shields.io/badge/package%20manager-uv-2f80ed)](https://docs.astral.sh/uv/)
+[![OpenCV](https://img.shields.io/badge/vision-OpenCV-green)](https://opencv.org/)
+[![IMU](https://img.shields.io/badge/sensors-camera%20%2B%20IMU-orange)](docs/algorithm.md)
 [![Version](https://img.shields.io/badge/version-0.1.0-2ea44f)](https://github.com/LilPetia/awesome-feature-navigation)
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
