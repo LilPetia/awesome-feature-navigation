@@ -207,7 +207,6 @@ marimo/_lsp/
 __marimo__/
 
 # Project outputs
-out/
 outputs/*
 !outputs/.gitkeep
 trajectory*.csv
@@ -220,7 +219,7 @@ data/*.mp4
 *.log
 *.nav
 *.out
-*.pdf
 *.snm
 *.synctex.gz
 *.toc
+*.vrb
